@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC demo</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/imjoy-rpc@0.5.36/dist/hypha-rpc-websocket.min.js"></script>
+    <script src="https://lib.imjoy.io/imjoy-loader.js"></script>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+
+        #app {
+            padding: 20px;
+        }
+
+        #title {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+        }
+
+        #viewer-section {
+            display: flex; /* Use flexbox for layout */
+            justify-content: left; /* Center the children horizontally */
+            align-items: start; /* Align items to the start of the cross axis */
+            flex-wrap: wrap; /* Allow items to wrap as needed */
+            max-width: 100%; /* Ensure the section does not overflow the viewport width */
+        }
+
+        #media {
+            flex-grow: 1; /* Allow the video container to grow and take up space */
+            max-width: 480px; /* Adjust based on desired size of video output */
+            max-height: 480px; /* Adjust height automatically */
+        }
+
+        #control-panel {
+            flex-grow: 1; /* Allow the control panel to grow */
+            max-width: 15%; /* Adjust based on desired size of the control panel */
+            margin-left: 20px; /* Add some space between the video and control panel */
+            align-items: center; /* Center items horizontally (since it's a column layout) */
+            padding: 10px;
+            background-color: rgba(255, 255, 255, 0.8);
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        /* Ensure the video fills the container */
+        video {
+            width: 100%;
+            height: auto;
+        }
+
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <h1 id="title" class="text-center mb-4">WebRTC Hypha Demo</h1>
+        <div class="form-group">
+            <label for="service-id">WebRTC service id: </label>
+            <input id="service-id" type="text" value="squid-control-service-simulation" class="form-control" />
+        </div>
+        <div class="d-flex mb-3">
+            <div class="form-group">
+                <label for="x-move">X Movement (mm): </label>
+                <input id="x-move" type="number" value="1" class="form-control" />
+            </div>
+            <div class="form-group">
+                <label for="y-move">Y Movement (mm): </label>
+                <input id="y-move" type="number" value="1" class="form-control" />
+            </div>
+            <div class="form-group">
+                <label for="z-move">Z Movement (mm): </label>
+                <input id="z-move" type="number" value="1" class="form-control" />
+            </div>
+                
+        </div>
+        <div id="viewer-section" class="position-relative">
+            
+            <div id="media" class="shadow-lg">
+                <audio id="audio" autoplay="true"></audio>
+                <video id="video" autoplay="true" playsinline="true"></video>
+               
+            </div>
+            <div id="control-panel" class="d-flex flex-column align-items-center justify-content-center">
+                <button id="startStopButton" class="btn btn-primary" onclick="window.methods.toggleLive()">
+                    <span id="startStopIcon" class="fas fa-play"></span>
+                </button>
+                <br>
+                <button class="btn btn-secondary mb-2" onclick="window.methods.moveMicroscope('y', 1)"><i class="fas fa-arrow-up"></i></button>
+                <div class="d-flex justify-content-between">
+                    <button class="btn btn-secondary mr-2" onclick="window.methods.moveMicroscope('x', -1)"><i class="fas fa-arrow-left"></i></button>
+                    <button class="btn btn-secondary ml-2" onclick="window.methods.moveMicroscope('x', 1)"><i class="fas fa-arrow-right"></i></button>
+                </div>
+                <button class="btn btn-secondary mt-2" onclick="window.methods.moveMicroscope('y', -1)"><i class="fas fa-arrow-down"></i></button>
+                <button id="toggleLightButton" class="btn btn-warning mt-2" onclick="window.methods.toggleLight()">
+                    <span id="toggleLightIcon" class="fas fa-lightbulb"></span>
+                </button>
+                <button id="scanPlateButton" class="btn btn-info mt-2" onclick="window.methods.startPlateScan()">
+                    <span id="scanPlateIcon" class="fas fa-microscope"></span> Scan Plate
+                </button>
+
+                
+            </div>
+            </div>
+            <svg id="well-plate-svg" style="width: 300px; height: 200px;"> <!-- Adjust size as needed -->
+                <image href="images/96-Well_plate.svg" width="100%" height="100%"/>
+                
+                <circle id="stage-indicator" cx="120" cy="100" r="9" fill="red" visibility="visible"/> <!-- Red dot -->
+            </svg>
+            <label for="current_location">Current location of stage </label>
+            
+        </div>
+
+    
+
+        
+    </div>
+
+    <!-- This is the main entry point of the ImJoy app
+     You can also load the ImJoy app from a remote URL
+     by setting the `src` attribute of the script tag -->
+    
+    <div id="window-container"></div>
+    <div id="menu-container"></div>
+
+    <script>
+        function setupImJoyApp(){
+            loadImJoyBasicApp({
+                process_url_query: true,
+                show_window_title: false,
+                show_progress_bar: true,
+                show_empty_window: true,
+                menu_style: { position: "absolute", right: 0, top: "2px" },
+                window_style: {width: '100%', height: '100%'},
+                main_container: null,
+                menu_container: "menu-container",
+                window_manager_container: "window-container",
+                imjoy_api: { } // override some imjoy API functions here
+            }).then(async app => {
+                // get the api object from the root plugin
+                const api = app.imjoy.api;
+                // if you want to let users to load new plugins, add a menu item
+                app.addMenuItem({
+                    label: "➕ Load Plugin",
+                    callback() {
+                    const uri = prompt(
+                        `Please type a ImJoy plugin URL`,
+                        "https://raw.githubusercontent.com/aicell-lab/squid-control/dorna-squid/imjoy_plugin/squid-microscope-chatbot.imjoy.html"
+                    );
+                    if (uri) app.loadPlugin(uri);
+                    },
+                });
+                // add a menu item to show the plugin info
+                app.addMenuItem({
+                    label: "Squid Control Chatbot",
+                    async callback() {
+                        //const chatbot = await api.createWindow({src: "https://reef.aicell.io/2hDGvySiiyHU3fuGNeLmU3/apps/bioimageio-chatbot-client/index"})
+                        // Prompt the user to input the src URL
+                        const userSrc = prompt("Please enter the URL for the microscope control chatbot:", "https://raw.githubusercontent.com/aicell-lab/squid-control/dorna-squid/imjoy_plugin/squid-microscope-chatbot.imjoy.html");
+                        // Create the window with the provided src URL
+                        if(userSrc) {
+                            const chatbot = await api.createWindow({src: userSrc})
+                            // ... [rest of your existing code]
+                        } else {
+                            alert("No URL provided. Window creation cancelled.");
+                        }
+
+                    },
+                });
+
+            
+            });
+        }
+
+
+
+        
+        const queryString = window.location.search;
+        const urlParams = new URLSearchParams(queryString);
+
+        if (urlParams.get('service_id')) {
+            document.getElementById('service-id').value = urlParams.get('service_id');
+        }
+
+        function assert(condition, message) {
+            if (!condition) {
+                throw new Error(message || "Assertion failed");
+            }
+        }
+
+        // Function to update the position of the red dot
+        function updateStageIndicator(x, y) {
+            const stageIndicator = document.getElementById('stage-indicator');
+            stageIndicator.setAttribute('cx', x);
+            stageIndicator.setAttribute('cy', y);
+            stageIndicator.setAttribute('visibility', 'visible');
+        }
+
+        let pc;
+        let context = {
+            user: { is_anonymous: false, email: "example@email.com" },
+            login_url: "your_login_url",
+            report_url: "your_report_url",
+            key: "your_key"
+        };
+        window.methods = {
+            liveRunning: false,
+
+            toggleLive: async function() {
+                const button = document.getElementById('startStopButton');
+                const icon = document.getElementById('startStopIcon');
+
+                if (!this.liveRunning) {
+                    button.classList.remove('btn-primary');
+                    button.classList.add('btn-danger');
+                    icon.classList.remove('fa-play');
+                    icon.classList.add('fa-stop');
+                    button.disabled = true;
+                    await this.start();
+                    button.disabled = false;
+                } else {
+                    button.classList.remove('btn-danger');
+                    button.classList.add('btn-primary');
+                    icon.classList.remove('fa-stop');
+                    icon.classList.add('fa-play');
+                    this.stop();
+                }
+
+                this.liveRunning = !this.liveRunning;
+            },
+
+            start: async function() {
+                const hostCanvas = document.createElement('canvas');
+                const service_id = document.getElementById('service-id').value;
+                const server = await hyphaWebsocketClient.connectToServer({ "name": "js-client", "server_url": "https://ai.imjoy.io", "method_timeout": 10 })
+                async function on_init(peerConnection){
+                    // connect audio / video
+                    peerConnection.addEventListener('track', function (evt) {
+                        if (evt.track.kind == 'video')
+                            document.getElementById('video').srcObject = evt.streams[0];
+                        else
+                            document.getElementById('audio').srcObject = evt.streams[0];
+                    });
+
+                    const frameRate = 20;
+                    // need to call getContext for Firefox: https://bugzilla.mozilla.org/show_bug.cgi?id=1572422
+                    const context = hostCanvas.getContext('2d');
+                    const stream = hostCanvas.captureStream(frameRate);
+                    for(let track of stream.getVideoTracks()){
+                        await peerConnection.addTrack(track, stream);
+                    };
+
+                    // send stage location to the other side
+                    peerConnection.addEventListener('datachannel', event => {
+                        const dataChannel = event.channel;
+
+                        if (dataChannel.label === "microscopeStatus") {
+                            dataChannel.onopen = () => console.log('Data channel for stageStatus is open');
+                            dataChannel.onclose = () => console.log('Data channel for stageStatus is closed');
+                            dataChannel.onmessage = e => {
+                                try {
+                                    const squidStatus = JSON.parse(e.data);
+                                    console.log('microscope status:', squidStatus);
+                                    updateStageIndicator(squidStatus.x, squidStatus.y);
+                                } catch (error) {
+                                    console.error('Error parsing stage location data:', error);
+                                }
+                            };
+                        }
+                    });
+
+
+                }
+                
+                pc = await hyphaWebsocketClient.getRTCService(
+                    server,
+                    service_id,
+                    {on_init},
+                );
+                // now we can access the services using the webrtc peer-to-peer connection
+                // the rpc calls will go through webrtc instead of the websocket
+                const mc = await pc.get_service("microscope-control-squid");
+                console.log('==========microscope control=========>', mc)
+                // expose it to window so the button click can call it
+                window.microscopeControl = mc;
+            },
+
+            stop: function() {
+                window.microscopeControl.off_illumination({_rkwargs: true, context: context});
+                pc.close();
+            },
+        
+            lightOn: false,
+
+            toggleLight: async function() {
+                const button = document.getElementById('toggleLightButton');
+                const icon = document.getElementById('toggleLightIcon');
+                // Check if microscopeControl is initialized, if not, call start
+                if (!window.microscopeControl) {
+                    await this.start();
+                }
+                if (!this.lightOn) {
+                    button.classList.add('btn-success');
+                    button.classList.remove('btn-warning');
+                    icon.classList.add('fa-lightbulb-on');
+                    icon.classList.remove('fa-lightbulb');
+                    await window.microscopeControl.on_illumination({_rkwargs: true, context: context});
+                } else {
+                    button.classList.add('btn-warning');
+                    button.classList.remove('btn-success');
+                    icon.classList.remove('fa-lightbulb-on');
+                    icon.classList.add('fa-lightbulb');
+                    await window.microscopeControl.off_illumination({_rkwargs: true, context: context});
+                }
+
+                this.lightOn = !this.lightOn;
+            },
+
+            plateScanRunning: false,
+
+            startPlateScan: function() {
+                const button = document.getElementById('scanPlateButton');
+                const icon = document.getElementById('scanPlateIcon');
+
+                if (!this.plateScanRunning) {
+                    // Change button to active state
+                    button.classList.add('btn-success');
+                    button.classList.remove('btn-info');
+                    icon.classList.add('fa-check');
+                    icon.classList.remove('fa-microscope');
+
+                    // Add the logic to start the 96 well plate scanning
+                    console.log("Starting 96 well plate scanning...");
+                    // Example: Call a function from your microscope control
+                if (window.microscopeControl) {
+                    window.microscopeControl.scan_well_plate({_rkwargs: true, context: context});
+                }
+                } else {
+                    // Change button back to initial state
+                    button.classList.remove('btn-success');
+                    button.classList.add('btn-info');
+                    icon.classList.remove('fa-check');
+                    icon.classList.add('fa-microscope');
+
+                    // Add logic to stop the 96 well plate scanning
+                    console.log("Stopping 96 well plate scanning...");
+                    // Example: Call a function from your microscope control
+                    if (window.microscopeControl) {
+                        window.microscopeControl.stop_scan({_rkwargs: true, context: context});
+                    }
+                }
+
+                this.plateScanRunning = !this.plateScanRunning;
+            },
+
+
+            moveMicroscope: function(direction, multiplier) {
+                if (!window.microscopeControl) {
+                    console.error("Microscope control is not initialized.");
+                    return;
+                }
+                else {
+                    console.log("Microscope control is initialized.");
+                }
+                try{
+                    const xMove = parseFloat(document.getElementById('x-move').value);
+                    const yMove = parseFloat(document.getElementById('y-move').value);
+                    const zMove = parseFloat(document.getElementById('z-move').value); // If Z movement is needed
+                    let moveX = 0, moveY = 0, moveZ = 0;
+
+                    if (isNaN(xMove) || isNaN(yMove) || isNaN(zMove)) {
+                        console.error("Invalid movement parameters.");
+                        return;
+                    }
+
+                    if (direction === 'x') {
+                        moveX = xMove * multiplier;
+                        moveY = 0;
+                        moveZ = 0;
+                    } else if (direction === 'y') {
+                        moveY = yMove * multiplier;
+                        moveX = 0;
+                        moveZ = 0;
+                    }
+                    // Example of handling Z movement
+                    if (direction === 'z') {
+                        moveZ = zMove * multiplier;
+
+                        moveX = 0;
+                        moveY = 0;
+                    }
+                    console.log("Moving by: ", moveX, moveY, moveZ);
+                    
+                    window.microscopeControl.move_by_distance({x: moveX, y: moveY, z: moveZ, _rkwargs: true, context: context});
+                }catch (error) {
+        console.error("Error in moveMicroscope:", error);
+                }
+
+            }
+
+        };
+
+
+        // Start the ImJoy app
+        document.addEventListener('DOMContentLoaded', function() {
+            setupImJoyApp();
+        });
+    </script>
+</body>
+
+</html>
