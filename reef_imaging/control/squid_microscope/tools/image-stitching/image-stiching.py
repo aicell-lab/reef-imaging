@@ -6,6 +6,31 @@ import json
 from tqdm import tqdm
 import tifffile  # Add this import
 
+def compute_overlap_percent(deltaX, deltaY, image_width, image_height, pixel_size_xy, min_overlap=0):
+    """Helper function to calculate percent overlap between images in a grid."""
+    shift_x = deltaX / pixel_size_xy
+    shift_y = deltaY / pixel_size_xy
+    overlap_x = max(0, image_width - shift_x)
+    overlap_y = max(0, image_height - shift_y)
+    overlap_x = overlap_x * 100.0 / image_width
+    overlap_y = overlap_y * 100.0 / image_height
+    overlap = max(min_overlap, overlap_x, overlap_y)
+    return overlap
+
+# CAMERA_PIXEL_SIZE_UM = 1.85, TUBE_LENS_MM = 50, OBJECTIVE_TUBE_LENS_MM = 180, MAGNIFICATION = 40
+def get_pixel_size(parameters, default_pixel_size=1.85, default_tube_lens_mm=50.0, default_objective_tube_lens_mm=180.0, default_magnification=40.0):
+    """Calculate pixel size based on imaging parameters."""
+    try:
+        tube_lens_mm = float(parameters.get('tube_lens_mm', default_tube_lens_mm))
+        pixel_size_um = float(parameters.get('sensor_pixel_size_um', default_pixel_size))
+        objective_tube_lens_mm = float(parameters['objective'].get('tube_lens_f_mm', default_objective_tube_lens_mm))
+        magnification = float(parameters['objective'].get('magnification', default_magnification))
+    except KeyError:
+        raise ValueError("Missing required parameters for pixel size calculation.")
+
+    pixel_size_xy = pixel_size_um / (magnification / (objective_tube_lens_mm / tube_lens_mm))
+    return pixel_size_xy
+
 def rotate_flip_image(image, angle, flip=False):
     """Rotate an image by a specified angle."""
     (h, w) = image.shape[:2]
@@ -30,7 +55,8 @@ def get_image_positions(parameters):
     dy = parameters["dy(mm)"] * 1000  # Convert mm to µm
     Nx = parameters["Nx"]
     Ny = parameters["Ny"]
-    return dx, dy, Nx, Ny
+    pixel_size_xy = get_pixel_size(parameters)
+    return dx, dy, Nx, Ny, pixel_size_xy
 
 def get_stage_limits():
     limits = {
@@ -84,7 +110,8 @@ def create_preview_image(canvas, max_size=4000):
 
 def process_channel(channel_name, image_info, parameters, output_folder, rotation_angle=0):
     """Process one channel at a time to reduce memory usage, with optional rotation."""
-    dx, dy, Nx, Ny = get_image_positions(parameters)
+    
+    dx, dy, Nx, Ny, pixel_size_xy = get_image_positions(parameters)
 
     # Filter images for current channel
     channel_images = [info for info in image_info if info["channel_name"] == channel_name]
@@ -95,10 +122,15 @@ def process_channel(channel_name, image_info, parameters, output_folder, rotatio
     # Get image dimensions from first image
     sample_image = cv2.imread(channel_images[0]["filepath"])
     img_height, img_width, _ = sample_image.shape
+    overlap_percent = min(100, compute_overlap_percent(dx, dy, img_width, img_height, pixel_size_xy))
+
+    # Calculate effective step size (accounting for overlap)
+    x_step = img_width * (1 - overlap_percent / 100)
+    y_step = img_height * (1 - overlap_percent / 100)
 
     # Calculate canvas size
-    canvas_width = img_width * Nx
-    canvas_height = img_height * Ny
+    canvas_width = int(img_width + (Nx - 1) * x_step)
+    canvas_height = int(img_height + (Ny - 1) * y_step)
 
     # Create output file paths
     output_path = os.path.join(output_folder, f"stitched_{channel_name}.tiff")
@@ -113,8 +145,8 @@ def process_channel(channel_name, image_info, parameters, output_folder, rotatio
         y_idx = info["y_idx"]
 
         # Calculate position on canvas
-        x_pos = x_idx * img_width
-        y_pos = (Ny - y_idx - 1) * img_height
+        x_pos = int(x_idx * x_step)
+        y_pos = int((Ny - y_idx - 1) * y_step)
 
         # Read image and convert to grayscale if it's not already
         image = cv2.imread(info["filepath"], cv2.IMREAD_GRAYSCALE)
@@ -151,9 +183,9 @@ def process_channel(channel_name, image_info, parameters, output_folder, rotatio
 
 def main():
     # Paths and parameters
-    image_folder = "/media/reef/harddisk/test_stitching"
+    image_folder = "/media/reef/harddisk/test_stitching/stitching_dataset"
     parameter_file = os.path.join(image_folder, "acquisition parameters.json")
-    output_folder = os.path.join(image_folder, "stitched_output")
+    output_folder = "/media/reef/harddisk/test_stitching/stitched_output"
     os.makedirs(output_folder, exist_ok=True)
 
     # Load imaging parameters
