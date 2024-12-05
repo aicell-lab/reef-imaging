@@ -123,14 +123,17 @@ def process_channel(channel_name, image_info, parameters, output_folder, rotatio
     sample_image = cv2.imread(channel_images[0]["filepath"])
     img_height, img_width, _ = sample_image.shape
     overlap_percent = min(100, compute_overlap_percent(dx, dy, img_width, img_height, pixel_size_xy))
+    print(f"dx: {dx}, dy: {dy}, pixel_size_xy: {pixel_size_xy}")
+    print(f"Image dimensions: width={img_width}, height={img_height}")
+    print(f"Calculated overlap_percent: {overlap_percent}")
 
     # Calculate effective step size (accounting for overlap)
     x_step = img_width * (1 - overlap_percent / 100)
     y_step = img_height * (1 - overlap_percent / 100)
 
     # Calculate canvas size
-    canvas_width = int(img_width + (Nx - 1) * x_step)
-    canvas_height = int(img_height + (Ny - 1) * y_step)
+    canvas_width = int(img_width + (Nx - 1) * x_step + 10)  # Add a small buffer
+    canvas_height = int(img_height + (Ny - 1) * y_step + 10)
 
     # Create output file paths
     output_path = os.path.join(output_folder, f"stitched_{channel_name}.tiff")
@@ -145,9 +148,8 @@ def process_channel(channel_name, image_info, parameters, output_folder, rotatio
         y_idx = info["y_idx"]
 
         # Calculate position on canvas
-        x_pos = int(x_idx * x_step)
-        y_pos = int((Ny - y_idx - 1) * y_step)
-
+        x_pos = round(x_idx * x_step)
+        y_pos = round((Ny - y_idx - 1) * y_step) # origin (0, 0) is at the top-left corner when taking images, but at the bottom-left corner in the canvas
         # Read image and convert to grayscale if it's not already
         image = cv2.imread(info["filepath"], cv2.IMREAD_GRAYSCALE)
 
