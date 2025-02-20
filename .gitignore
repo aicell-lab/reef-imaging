@@ -177,3 +177,4 @@ node_modules/
 package-lock.json
 package.json
 .eslintrc.json
+traefik/acme/acme.json
