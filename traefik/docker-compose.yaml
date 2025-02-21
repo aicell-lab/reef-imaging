@@ -13,7 +13,7 @@ services:
       - --api
       # - --certificatesresolvers.leresolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
       - --certificatesresolvers.leresolver.acme.email=oeway007@gmail.com
-      - --certificatesresolvers.leresolver.acme.storage=/acme/acme.json
+      - --certificatesresolvers.leresolver.acme.storage=acme/acme.json
       - --certificatesResolvers.leresolver.acme.tlschallenge=true
       - --certificatesresolvers.leresolver.acme.httpchallenge=true
       - --certificatesresolvers.leresolver.acme.httpchallenge.entrypoint=web

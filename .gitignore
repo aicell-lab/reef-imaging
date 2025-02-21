@@ -178,3 +178,4 @@ package-lock.json
 package.json
 .eslintrc.json
 traefik/acme/acme.json
+traefik/logs/*
