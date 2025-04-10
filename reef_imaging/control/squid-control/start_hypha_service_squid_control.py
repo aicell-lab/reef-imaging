@@ -937,8 +937,7 @@ class Microscope:
         if not self.service_id:
             raise ValueError("MICROSCOPE_SERVICE_ID is not set in the environment variables.")
         if self.is_local:
-            #no toecken needed for local server
-            token = None
+            token = os.environ.get("REEF_LOCAL_TOKEN")
             server = await connect_to_server(
                 {"server_url": self.server_url, "token": token,  "ping_interval": None}
             )

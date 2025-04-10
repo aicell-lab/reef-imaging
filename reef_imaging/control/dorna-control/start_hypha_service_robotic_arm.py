@@ -153,7 +153,7 @@ class RoboticArmService:
 
     async def setup(self):
         if self.local:
-            token = None
+            token = os.environ.get("REEF_LOCAL_TOKEN")
             server = await connect_to_server({"server_url": self.server_url, "token": token, "ping_interval": None})
         else:
             try:

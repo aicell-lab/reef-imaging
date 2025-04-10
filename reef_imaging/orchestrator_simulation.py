@@ -9,13 +9,15 @@ import logging
 import sys
 import logging.handlers
 from datetime import datetime
+import argparse
+
 # Set up logging
-def setup_logging(log_file="orchestrator.log", max_bytes=100000, backup_count=3):
+def setup_logging(log_file="orchestrator.log", max_bytes=10*1024*1024, backup_count=5):
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
 
-    # Rotating file handler
+    # Rotating file handler with 10MB limit
     file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
@@ -57,7 +59,9 @@ MICROSCOPE_ID = "microscope-squid-reef"
 ROBOTIC_ARM_ID = "robotic-arm-control-simulation"
 
 class OrchestrationSystem:
-    def __init__(self):
+    def __init__(self, local=False):
+        self.local = local
+        self.server_url = "http://reef.dyn.scilifelab.se:9527" if local else server_url
         self.incubator = None
         self.microscope = None
         self.robotic_arm = None
@@ -65,21 +69,24 @@ class OrchestrationSystem:
     
     async def setup_connections(self):
         global reef_token, squid_token
+        if self.local:
+            reef_token = os.environ.get("REEF_LOCAL_TOKEN")
+            squid_token = os.environ.get("REEF_LOCAL_TOKEN")
         if not reef_token or not squid_token:
-            token = await login({"server_url": server_url})
+            token = await login({"server_url": self.server_url})
             reef_token = token
             squid_token = token
 
         reef_server = await connect_to_server({
-            "server_url": server_url,
+            "server_url": self.server_url,
             "token": reef_token,
-            "workspace": "reef-imaging",
+            "workspace": os.environ.get("REEF_LOCAL_WORKSPACE") if self.local else "reef-imaging",
             "ping_interval": None
         })
         squid_server = await connect_to_server({
-            "server_url": server_url,
+            "server_url": self.server_url,
             "token": squid_token,
-            "workspace": "squid-control",
+            "workspace": os.environ.get("REEF_LOCAL_WORKSPACE") if self.local else "squid-control",
             "ping_interval": None
         })
 
@@ -95,7 +102,7 @@ class OrchestrationSystem:
 
     async def check_service_health(self, service):
         """Check if the service is healthy and reset if needed"""
-        service_name = service._id if hasattr(service, "_id") else "unknown"
+        service_name = service.id if hasattr(service, "id") else "unknown"
         service_type = None
         
         # Determine which service this is
@@ -166,15 +173,15 @@ class OrchestrationSystem:
             global reef_token, squid_token
             
             if not reef_token or not squid_token:
-                token = await login({"server_url": server_url})
+                token = await login({"server_url": self.server_url})
                 reef_token = token
                 squid_token = token
             
             if service_type == 'incubator':
                 reef_server = await connect_to_server({
-                    "server_url": server_url,
+                    "server_url": self.server_url,
                     "token": reef_token,
-                    "workspace": "reef-imaging",
+                    "workspace": os.environ.get("REEF_LOCAL_WORKSPACE") if self.local else "reef-imaging",
                     "ping_interval": None
                 })
                 self.incubator = await reef_server.get_service(INCUBATOR_ID)
@@ -182,9 +189,9 @@ class OrchestrationSystem:
                 
             elif service_type == 'microscope':
                 squid_server = await connect_to_server({
-                    "server_url": server_url,
+                    "server_url": self.server_url,
                     "token": squid_token,
-                    "workspace": "squid-control",
+                    "workspace": os.environ.get("REEF_LOCAL_WORKSPACE") if self.local else "squid-control",
                     "ping_interval": None
                 })
                 self.microscope = await squid_server.get_service(MICROSCOPE_ID)
@@ -192,9 +199,9 @@ class OrchestrationSystem:
                 
             elif service_type == 'robotic_arm':
                 reef_server = await connect_to_server({
-                    "server_url": server_url,
+                    "server_url": self.server_url,
                     "token": reef_token,
-                    "workspace": "reef-imaging",
+                    "workspace": os.environ.get("REEF_LOCAL_WORKSPACE") if self.local else "reef-imaging",
                     "ping_interval": None
                 })
                 self.robotic_arm = await reef_server.get_service(ROBOTIC_ARM_ID)
@@ -261,7 +268,11 @@ class OrchestrationSystem:
 
                 if status == "not_started":
                     logger.info(f"Starting the task {method_name}...")
-                    await asyncio.wait_for(getattr(service, method_name)(*args, **kwargs), timeout=timeout)
+                    try:
+                        await asyncio.wait_for(getattr(service, method_name)(*args, **kwargs), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Operation {method_name} timed out, but continuing to check status")
+                        # Continue to the status checking loop below
 
                 # Wait for the task to complete
                 while True:
@@ -273,22 +284,7 @@ class OrchestrationSystem:
                     elif status == "failed":
                         logger.error(f"Task {method_name} failed.")
                         return False
-                    await asyncio.sleep(1)
-
-            except asyncio.TimeoutError:
-                logger.warning(f"Operation {method_name} timed out. Retrying... ({retries + 1}/{max_retries})")
-                # Check status every 5 seconds after timeout
-                while True:
-                    status = await service.get_task_status(method_name)
-                    logger.info(f"Task {method_name} status after timeout: {status}")
-                    if status == "finished":
-                        logger.info(f"Task {method_name} completed successfully after timeout.")
-                        await service.reset_task_status(method_name)
-                        return True
-                    elif status == "failed":
-                        logger.error(f"Task {method_name} failed after timeout.")
-                        return False
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(5)  # Check status every 5 seconds
 
             except Exception as e:
                 logger.error(f"Error: {e}. Retrying... ({retries + 1}/{max_retries})")
@@ -410,7 +406,11 @@ class OrchestrationSystem:
             await asyncio.sleep(sleep_time)
 
 async def main():
-    orchestrator = OrchestrationSystem()
+    parser = argparse.ArgumentParser(description='Run the Orchestration System.')
+    parser.add_argument('--local', action='store_true', help='Run in local mode using REEF_LOCAL_TOKEN and REEF_LOCAL_WORKSPACE')
+    args = parser.parse_args()
+
+    orchestrator = OrchestrationSystem(local=args.local)
     await orchestrator.setup_connections()
     await orchestrator.run_time_lapse(round_time=IMAGING_INTERVAL)
 
