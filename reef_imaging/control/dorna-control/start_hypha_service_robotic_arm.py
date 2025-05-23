@@ -64,7 +64,9 @@ class RoboticArmService:
             "get_all_joints": "not_started",
             "get_all_positions": "not_started",
             "light_on": "not_started",
-            "light_off": "not_started"
+            "light_off": "not_started",
+            "incubator_to_microscope": "not_started",
+            "microscope_to_incubator": "not_started"
         }
 
     async def check_service_health(self):
@@ -143,7 +145,10 @@ class RoboticArmService:
             "light_on": self.light_on,
             "light_off": self.light_off,
             "get_actions": self.get_actions,
-            "execute_action": self.execute_action
+            "execute_action": self.execute_action,
+            # Add microscope ID functions
+            "incubator_to_microscope": self.incubator_to_microscope,
+            "microscope_to_incubator": self.microscope_to_incubator
         })
 
         logger.info(f"Robotic arm control service registered at workspace: {server.config.workspace}, id: {svc.id}")
@@ -456,6 +461,72 @@ class RoboticArmService:
         except Exception as e:
             self.task_status[task_name] = "failed"
             logger.error(f"Failed to transport sample from microscope1 to incubator: {e}")
+            raise e
+    
+    @schema_function(skip_self=True)
+    def incubator_to_microscope(self, microscope_id=1):
+        """
+        Move a sample from the incubator to microscopes
+        Returns: bool
+        """
+        if not self.connected:
+            self.connect()
+        task_name = "incubator_to_microscope"
+        self.task_status[task_name] = "started"
+        self.set_motor(1)
+        try:
+            if microscope_id == 1:
+                self.play_script("paths/grab_from_incubator.txt")
+                self.play_script("paths/transport_from_incubator_to_microscope1.txt")
+                self.play_script("paths/put_on_microscope1.txt")
+                logger.info(f"Sample moved from incubator to microscope 1")
+            elif microscope_id == 2:
+                self.play_script("paths/grab_from_incubator.txt")
+                self.play_script("paths/transport_from_incubator_to_microscope2.txt")
+                self.play_script("paths/put_on_microscope2.txt")
+                logger.info(f"Sample moved from incubator to microscope 2")
+            else:
+                logger.error(f"Invalid microscope ID: {microscope_id}")
+                raise Exception(f"Invalid microscope ID: {microscope_id}")
+            
+            self.task_status[task_name] = "finished"
+            return True
+        except Exception as e:
+            self.task_status[task_name] = "failed"
+            logger.error(f"Failed to move sample from incubator to microscope {microscope_id}: {e}")
+            raise e
+    
+    @schema_function(skip_self=True)
+    def microscope_to_incubator(self, microscope_id=1):
+        """
+        Move a sample from microscopes to the incubator
+        Returns: bool
+        """
+        if not self.connected:
+            self.connect()
+        task_name = "microscope_to_incubator"
+        self.task_status[task_name] = "started"
+        self.set_motor(1)
+        try:
+            if microscope_id == 1:
+                self.play_script("paths/grab_from_microscope1.txt")
+                self.play_script("paths/transport_from_microscope1_to_incubator.txt")
+                self.play_script("paths/put_on_incubator.txt")
+                logger.info(f"Sample moved from microscope 1 to incubator")
+            elif microscope_id == 2:
+                self.play_script("paths/grab_from_microscope2.txt")
+                self.play_script("paths/transport_from_microscope2_to_incubator.txt")
+                self.play_script("paths/put_on_incubator.txt")
+                logger.info(f"Sample moved from microscope 2 to incubator")
+            else:
+                logger.error(f"Invalid microscope ID: {microscope_id}")
+                raise Exception(f"Invalid microscope ID: {microscope_id}")
+                
+            self.task_status[task_name] = "finished"
+            return True
+        except Exception as e:
+            self.task_status[task_name] = "failed"
+            logger.error(f"Failed to move sample from microscope {microscope_id} to incubator: {e}")
             raise e
 
     @schema_function(skip_self=True)

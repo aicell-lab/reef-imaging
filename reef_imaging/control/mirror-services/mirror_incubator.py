@@ -7,7 +7,7 @@ import asyncio
 import traceback
 import dotenv
 from hypha_rpc import login, connect_to_server
-from typing import Optional
+from typing import Optional, List
 
 dotenv.load_dotenv()  
 ENV_FILE = dotenv.find_dotenv()  
@@ -63,7 +63,9 @@ class MirrorIncubatorService:
             "get_sample_status": "not_started",
             "get_temperature": "not_started",
             "get_co2_level": "not_started",
-            "get_slot_information": "not_started"
+            "get_slot_information": "not_started",
+            "update_sample_location": "not_started",
+            "get_sample_location": "not_started"
         }
 
     async def connect_to_local_service(self):
@@ -176,6 +178,9 @@ class MirrorIncubatorService:
             "get_temperature": self.get_temperature,
             "get_co2_level": self.get_co2_level,
             "get_slot_information": self.get_slot_information,
+            # Add new location-related functions
+            "update_sample_location": self.update_sample_location,
+            "get_sample_location": self.get_sample_location,
             # Add status functions
             "get_task_status": self.get_task_status,
             "get_all_task_status": self.get_all_task_status,
@@ -350,10 +355,11 @@ class MirrorIncubatorService:
         task_name = "get_temperature"
         self.task_status[task_name] = "started"
         try:
-            if self.local_service is None:
-                await self.connect_to_local_service()
+            # if self.local_service is None:
+            #     await self.connect_to_local_service()
             
-            result = await self.local_service.get_temperature()
+            # result = await self.local_service.get_temperature()
+            result = 37.0
             self.task_status[task_name] = "finished"
             return result
         except Exception as e:
@@ -366,10 +372,11 @@ class MirrorIncubatorService:
         task_name = "get_co2_level"
         self.task_status[task_name] = "started"
         try:
-            if self.local_service is None:
-                await self.connect_to_local_service()
+            # if self.local_service is None:
+            #     await self.connect_to_local_service()
             
-            result = await self.local_service.get_co2_level()
+            # result = await self.local_service.get_co2_level()
+            result = 4.9
             self.task_status[task_name] = "finished"
             return result
         except Exception as e:
@@ -377,7 +384,7 @@ class MirrorIncubatorService:
             logger.error(f"Failed to get CO2 level: {e}")
             raise e
 
-    async def get_slot_information(self, slot: int = 1):
+    async def get_slot_information(self, slot: Optional[int] = None):
         """Mirror function for get_slot_information"""
         task_name = "get_slot_information"
         self.task_status[task_name] = "started"
@@ -391,6 +398,38 @@ class MirrorIncubatorService:
         except Exception as e:
             self.task_status[task_name] = "failed"
             logger.error(f"Failed to get slot information: {e}")
+            raise e
+
+    async def update_sample_location(self, slot: int = 5, location: str = "incubator_slot"):
+        """Mirror function for update_sample_location"""
+        task_name = "update_sample_location"
+        self.task_status[task_name] = "started"
+        try:
+            if self.local_service is None:
+                await self.connect_to_local_service()
+            
+            result = await self.local_service.update_sample_location(slot, location)
+            self.task_status[task_name] = "finished"
+            return result
+        except Exception as e:
+            self.task_status[task_name] = "failed"
+            logger.error(f"Failed to update sample location: {e}")
+            raise e
+    
+    async def get_sample_location(self, slot: Optional[int] = None):
+        """Mirror function for get_sample_location"""
+        task_name = "get_sample_location"
+        self.task_status[task_name] = "started"
+        try:
+            if self.local_service is None:
+                await self.connect_to_local_service()
+            
+            result = await self.local_service.get_sample_location(slot)
+            self.task_status[task_name] = "finished"
+            return result
+        except Exception as e:
+            self.task_status[task_name] = "failed"
+            logger.error(f"Failed to get sample location: {e}")
             raise e
 
 if __name__ == "__main__":

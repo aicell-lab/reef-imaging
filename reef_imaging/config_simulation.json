@@ -28,7 +28,12 @@
                 ],
                 "do_reflection_af": true
             },
-            "operational_state": {}
+            "operational_state": {
+                "status": "pending",
+                "next_run_time_utc": "2025-05-20T13:00:00",
+                "retries": 0,
+                "last_updated_by_orchestrator": "2025-05-20T14:36:35"
+            }
         }
     ]
 }

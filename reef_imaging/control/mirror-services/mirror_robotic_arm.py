@@ -68,7 +68,9 @@ class MirrorRoboticArmService:
             "get_all_joints": "not_started",
             "get_all_positions": "not_started",
             "light_on": "not_started",
-            "light_off": "not_started"
+            "light_off": "not_started",
+            "incubator_to_microscope": "not_started",
+            "microscope_to_incubator": "not_started"
         }
 
     async def connect_to_local_service(self):
@@ -199,7 +201,10 @@ class MirrorRoboticArmService:
             "light_on": self.light_on,
             "light_off": self.light_off,
             "get_actions": self.get_actions,
-            "execute_action": self.execute_action
+            "execute_action": self.execute_action,
+            # Add microscope ID functions
+            "incubator_to_microscope": self.incubator_to_microscope,
+            "microscope_to_incubator": self.microscope_to_incubator
         })
 
         logger.info(
@@ -377,7 +382,45 @@ class MirrorRoboticArmService:
             self.task_status[task_name] = "failed"
             logger.error(f"Failed to transport from microscope1 to incubator: {e}")
             raise e
+    
+    async def incubator_to_microscope(self, microscope_id=1):
+        """
+        Move a sample from the incubator to microscopes
+        Returns: bool
+        """
+        task_name = "incubator_to_microscope"
+        self.task_status[task_name] = "started"
+        try:
+            if self.local_service is None:
+                await self.connect_to_local_service()
+                                
+            result = await self.local_service.incubator_to_microscope(microscope_id)
+            self.task_status[task_name] = "finished"
+            return result
+        except Exception as e:
+            self.task_status[task_name] = "failed"
+            logger.error(f"Failed to move sample from incubator to microscope: {e}")
+            raise e
 
+    async def microscope_to_incubator(self, microscope_id=1):
+        """
+        Move a sample from microscopes to the incubator
+        Returns: bool
+        """
+        task_name = "microscope_to_incubator"
+        self.task_status[task_name] = "started"
+        try:
+            if self.local_service is None:
+                await self.connect_to_local_service()
+
+            result = await self.local_service.microscope_to_incubator(microscope_id)
+            self.task_status[task_name] = "finished"
+            return result
+        except Exception as e:
+            self.task_status[task_name] = "failed"
+            logger.error(f"Failed to move sample from microscope to incubator: {e}")
+            raise e
+                
     async def connect(self):
         """Mirror function for connect"""
         task_name = "connect"

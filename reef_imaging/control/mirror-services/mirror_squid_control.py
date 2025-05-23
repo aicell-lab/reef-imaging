@@ -46,7 +46,7 @@ class MirrorMicroscopeService:
         # Connection to local service
         self.local_server_url = "http://reef.dyn.scilifelab.se:9527"
         self.local_token = os.environ.get("REEF_LOCAL_TOKEN")
-        self.local_service_id = os.environ.get("MICROSCOPE_SERVICE_ID", "microscope-control-squid-1")
+        self.local_service_id = "microscope-control-squid-1"
         self.local_server = None
         self.local_service = None
 
@@ -588,9 +588,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Mirror service for Squid microscope control."
     )
+    parser.add_argument(
+        "--cloud-service-id",
+        default="mirror-microscope-control-squid-1",
+        help="ID for the cloud service (default: mirror-microscope-control-squid-1)"
+    )
+    parser.add_argument(
+        "--local-service-id",
+        default="microscope-control-squid-1",
+        help="ID for the local service (default: microscope-control-squid-1)"
+    )
     args = parser.parse_args()
 
     mirror_service = MirrorMicroscopeService()
+    # Override the service IDs with command line arguments
+    mirror_service.cloud_service_id = args.cloud_service_id
+    mirror_service.local_service_id = args.local_service_id
 
     loop = asyncio.get_event_loop()
 

@@ -5,7 +5,7 @@ from hypha_rpc import connect_to_server, login
 from cytomat import Cytomat
 from pydantic import Field
 from hypha_rpc.utils.schema import schema_function
-from typing import Optional
+from typing import Optional, List
 import dotenv
 import json
 import logging
@@ -82,7 +82,9 @@ class IncubatorService:
             "get_sample_status": "not_started",
             "get_temperature": "not_started",
             "get_co2_level": "not_started",
-            "get_slot_information": "not_started"
+            "get_slot_information": "not_started",
+            "update_sample_location": "not_started",
+            "get_sample_location": "not_started"
         }
 
     async def check_service_health(self):
@@ -150,6 +152,9 @@ class IncubatorService:
             "get_temperature": self.get_temperature,
             "get_co2_level": self.get_co2_level,
             "get_slot_information": self.get_slot_information,
+            # Add new location-related functions
+            "update_sample_location": self.update_sample_location,
+            "get_sample_location": self.get_sample_location,
             # Add status functions
             "get_task_status": self.get_task_status,
             "get_all_task_status": self.get_all_task_status,
@@ -257,7 +262,7 @@ class IncubatorService:
         return "Hello world"
     
     @schema_function(skip_self=True)
-    def get_slot_information(self, slot: int = Field(1, description="Slot number, range: 1-42")):
+    def get_slot_information(self, slot: Optional[int] = Field(None, description="Slot number, range: 1-42, or None for all slots")):
         """Get the current slot information of the incubator"""
         task_name = "get_slot_information"
         self.task_status[task_name] = "started"
@@ -265,10 +270,20 @@ class IncubatorService:
             if not self.simulation:
                 with open(self.samples_file, 'r') as file:
                     samples = json.load(file)
-                slot_info = next((sample for sample in samples if sample["incubator_slot"] == slot), None)
+                
+                if slot is None:
+                    # Return information for all slots
+                    slot_info = samples
+                else:
+                    # Return information for the specified slot
+                    slot_info = next((sample for sample in samples if sample["incubator_slot"] == slot), None)
             else:
                 time.sleep(10)
-                slot_info = {"incubator_slot": slot, "status": "Simulated"}
+                if slot is None:
+                    # Simulate information for all slots
+                    slot_info = [{"incubator_slot": i, "status": "Simulated"} for i in range(1, 43)]
+                else:
+                    slot_info = {"incubator_slot": slot, "status": "Simulated"}
             self.task_status[task_name] = "finished"
             return slot_info
         except Exception as e:
@@ -377,6 +392,52 @@ class IncubatorService:
             json.dump(samples, file, indent=4)
 
     @schema_function(skip_self=True)
+    def update_sample_location(self, slot: int = Field(5, description="Slot number, range: 1-42"), 
+                              location: str = Field("incubator_slot", description="Current location of the sample: incubator_slot, incubator_station, robotic_arm, microscope1, microscope2")):
+        """Update the location of a sample in the incubator"""
+        task_name = "update_sample_location"
+        self.task_status[task_name] = "started"
+        try:
+            # Update the sample's location in samples.json
+            with open(self.samples_file, 'r') as file:
+                samples = json.load(file)
+            for sample in samples:
+                if sample["incubator_slot"] == slot:
+                    sample["location"] = location
+                    break
+            with open(self.samples_file, 'w') as file:
+                json.dump(samples, file, indent=4)
+            self.task_status[task_name] = "finished"
+            return f"Sample in slot {slot} location updated to {location}."
+        except Exception as e:
+            self.task_status[task_name] = "failed"
+            logger.error(f"Failed to update sample location: {e}")
+            raise e
+
+    @schema_function(skip_self=True)
+    def get_sample_location(self, slot: Optional[int] = Field(None, description="Slot number, range: 1-42, or None for all slots")):
+        """Get the current location of a sample or all samples"""
+        task_name = "get_sample_location"
+        self.task_status[task_name] = "started"
+        try:
+            with open(self.samples_file, 'r') as file:
+                samples = json.load(file)
+            
+            if slot is None:
+                # Return a dictionary of all slot numbers to their locations
+                locations = {sample["incubator_slot"]: sample["location"] for sample in samples}
+            else:
+                # Return the location of the specified slot
+                locations = next((sample["location"] for sample in samples if sample["incubator_slot"] == slot), "Unknown")
+            
+            self.task_status[task_name] = "finished"
+            return locations
+        except Exception as e:
+            self.task_status[task_name] = "failed"
+            logger.error(f"Failed to get sample location: {e}")
+            raise e
+
+    @schema_function(skip_self=True)
     def put_sample_from_transfer_station_to_slot(self, slot: int = Field(5, description="Slot number,range: 1-42")):
         """
         Collect sample from transfer station to a slot
@@ -396,6 +457,8 @@ class IncubatorService:
                 c.wait_until_not_busy(timeout=50)
                 assert c.error_status == 0, f"Error status: {ERROR_CODES[self.c.error_status]}"
                 self.update_sample_status(slot, "IN")
+                # Update location to incubator_slot
+                self.update_sample_location(slot, "incubator_slot")
             else:
                 time.sleep(10)
             self.task_status[task_name] = "finished"
@@ -422,6 +485,8 @@ class IncubatorService:
                 c.wait_until_not_busy(timeout=50)
                 assert c.error_status == 0, f"Error status: {ERROR_CODES[self.c.error_status]}"
                 self.update_sample_status(slot, "OUT")
+                # Update location to incubator_station
+                self.update_sample_location(slot, "incubator_station")
             else:
                 time.sleep(10)
             self.task_status[task_name] = "finished"
