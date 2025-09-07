@@ -84,8 +84,10 @@ class OrchestrationSystem:
             logger.info(f"Health check for {service_type} ({service_identifier if service_identifier else ''}) already running.")
             return
         logger.info(f"Starting health check for {service_type} ({service_identifier if service_identifier else ''})...")
+        logger.debug(f"Creating health check task with key: {key}")
         task = asyncio.create_task(self.check_service_health(service_instance, service_type, service_identifier)) # Pass identifier
         self.health_check_tasks[key] = task
+        logger.debug(f"Health check task created and stored for {service_type} ({service_identifier if service_identifier else ''})")
 
     async def _stop_health_check(self, service_type, service_identifier=None): # MODIFIED signature
         key = (service_type, service_identifier) if service_identifier else service_type
@@ -361,9 +363,9 @@ class OrchestrationSystem:
             else:
                 logger.warning(f"Time point {current_tp_to_move_to_imaged.isoformat()} not found in pending_datetimes for task '{task_name}'. Cannot move.")
 
-        # Update status based on pending points
+        # Update status based on pending points (but respect explicit status like "uploading")
         if not task_config_internal["pending_datetimes"]: 
-            if task_state["status"] != "completed":
+            if task_state["status"] not in ["completed", "uploading"]:
                 logger.info(f"Task '{task_name}' has no more pending time points. Marking as completed.")
                 task_state["status"] = "completed"
                 changed = True
@@ -380,11 +382,13 @@ class OrchestrationSystem:
         # Use service_identifier for logging if available, otherwise fallback
         log_service_name_part = service_identifier if service_identifier else (service.id if hasattr(service, "id") else service_type)
         service_name = f"{service_type} ({log_service_name_part})"
+        
+        logger.info(f"Health check loop started for {service_name}")
             
         while True:
             try:
-                # check ping
-                ping_result = await service.ping()
+                # Set a timeout for the ping operation
+                ping_result = await asyncio.wait_for(service.ping(), timeout=5)
 
                 if ping_result != "pong": #also retry
                     logger.error(f"{service_name} service ping check failed: {ping_result}")
@@ -393,8 +397,11 @@ class OrchestrationSystem:
                 # Service is healthy, log success and continue with normal interval
                 logger.debug(f"{service_name} service health check passed.")
                 
-            except Exception as e:
-                logger.error(f"{service_name} service health check failed: {e}")
+            except (asyncio.TimeoutError, Exception) as e:
+                if isinstance(e, asyncio.TimeoutError):
+                    logger.error(f"{service_name} service ping timed out.")
+                else:
+                    logger.error(f"{service_name} service health check failed: {e}")
                 logger.info(f"Attempting to reset only the {service_type} service...")
                 
                 try:
@@ -556,6 +563,7 @@ class OrchestrationSystem:
                 self.robotic_arm = await reef_server.get_service(self.robotic_arm_id)
                 logger.info(f"Robotic arm ({self.robotic_arm_id}) connected locally.")
                 await self._start_health_check('robotic_arm', self.robotic_arm, self.robotic_arm_id)
+            
         except Exception as e:
             logger.error(f"Failed to connect to local REEF services (incubator/robotic arm): {e}")
             return False 
@@ -564,26 +572,38 @@ class OrchestrationSystem:
         connected_microscope_count = 0
         if not self.configured_microscopes_info:
             logger.warning("No microscopes defined in the configuration (self.configured_microscopes_info is empty).")
+        else:
+            logger.info(f"Found {len(self.configured_microscopes_info)} configured microscopes: {list(self.configured_microscopes_info.keys())}")
         
         for mic_id, mic_config in self.configured_microscopes_info.items():
             if mic_id not in self.microscope_services: 
                 logger.info(f"Attempting to connect to local microscope: {mic_id}...")
                 try:
+                    logger.debug(f"Connecting to SQUID server for microscope {mic_id} with workspace: {operational_workspace}")
                     squid_server_conn_for_mic = await connect_to_server({
                         "server_url": self.server_url, 
                         "token": operational_token,
                         "workspace": operational_workspace, # MODIFIED: Always use operational_workspace
                         "ping_interval": None
                     })
+                    logger.debug(f"Successfully connected to SQUID server for microscope {mic_id}")
+                    
+                    logger.debug(f"Getting microscope service instance for {mic_id}")
                     microscope_service_instance = await squid_server_conn_for_mic.get_service(mic_id)
                     self.microscope_services[mic_id] = microscope_service_instance
                     if mic_id not in self.sample_on_microscope_flags:
                         self.sample_on_microscope_flags[mic_id] = False
                     logger.info(f"Microscope {mic_id} connected locally.")
+                    
+                    logger.debug(f"Starting health check for microscope {mic_id}")
                     await self._start_health_check('microscope', microscope_service_instance, mic_id)
+                    logger.info(f"Health check started for microscope {mic_id}")
                     connected_microscope_count +=1
                 except Exception as e:
                     logger.error(f"Failed to connect to local microscope {mic_id}: {e}")
+                    logger.error(f"Exception type: {type(e).__name__}")
+                    import traceback
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
                     if mic_id in self.microscope_services: 
                         del self.microscope_services[mic_id]
             else:
@@ -597,6 +617,13 @@ class OrchestrationSystem:
                 await self.disconnect_single_service('microscope', mid)
 
         logger.info(f'Local device connection setup process completed. Connected {connected_microscope_count}/{len(self.configured_microscopes_info)} configured local microscopes.')
+        
+        # Debug: Log current health check status
+        logger.info(f"Current health check tasks: {list(self.health_check_tasks.keys())}")
+        for key, task in self.health_check_tasks.items():
+            status = "running" if not task.done() else "completed" if task.cancelled() else "failed"
+            logger.info(f"Health check {key}: {status}")
+        
         return bool(self.incubator and self.robotic_arm)
 
     async def disconnect_services(self):
