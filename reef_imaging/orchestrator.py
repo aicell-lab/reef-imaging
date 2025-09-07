@@ -841,7 +841,7 @@ class OrchestrationSystem:
                 status = task_data["status"]
                 pending_datetimes = internal_config.get("pending_datetimes", [])
 
-                if status in ["completed", "error"]:
+                if status in ["completed", "error", "uploading"]:
                     continue
                 
                 if not pending_datetimes:
@@ -932,7 +932,7 @@ class OrchestrationSystem:
                 min_wait_time = ORCHESTRATOR_LOOP_SLEEP
                 next_potential_run_time = None
                 for task_data_val in self.tasks.values():
-                    if task_data_val["status"] not in ["completed", "error"] and task_data_val["config"]["pending_datetimes"]:
+                    if task_data_val["status"] not in ["completed", "error", "uploading"] and task_data_val["config"]["pending_datetimes"]:
                         earliest_tp = task_data_val["config"]["pending_datetimes"][0]
                         if next_potential_run_time is None or earliest_tp < next_potential_run_time:
                             next_potential_run_time = earliest_tp
@@ -1062,6 +1062,7 @@ class OrchestrationSystem:
             "load_plate_from_incubator_to_microscope": self.load_plate_from_incubator_to_microscope_api,
             "unload_plate_from_microscope": self.unload_plate_from_microscope_api,
             "get_transport_queue_status": self.get_transport_queue_status,
+            "offline_stitch_and_upload_timelapse": self.offline_stitch_and_upload_timelapse_api,
         }
         
         registered_service = await self.orchestrator_hypha_server_connection.register_service(service_api)
@@ -1307,6 +1308,51 @@ class OrchestrationSystem:
         except Exception as e:
             logger.error(f"Failed to get transport queue status: {e}", exc_info=True)
             return {"error": str(e), "success": False}
+
+    @schema_function(skip_self=True)
+    async def offline_stitch_and_upload_timelapse_api(self, experiment_id: str, upload_immediately: bool = True, cleanup_temp_files: bool = True):
+        """API wrapper for offline stitching and upload timelapse functionality."""
+        logger.info(f"API call: offline_stitch_and_upload_timelapse for experiment_id: {experiment_id}")
+        
+        # Find matching tasks
+        matching_tasks = [name for name in self.tasks.keys() if experiment_id in name]
+        if not matching_tasks:
+            return {"success": False, "message": f"No tasks found matching experiment_id: {experiment_id}"}
+        
+        # Set tasks to uploading status
+        for task_name in matching_tasks:
+            await self._update_task_state_and_write_config(task_name, status="uploading")
+        
+        try:
+            # Ensure microscope services are connected
+            if not self.microscope_services:
+                logger.info("No microscope services connected. Attempting to setup connections...")
+                await self.setup_connections()
+            
+            # Get first available microscope service
+            microscope_service = next((service for service in self.microscope_services.values() if service), None)
+            if not microscope_service:
+                raise Exception("No microscope services available for offline processing")
+            
+            # Call offline stitching function
+            result = await microscope_service.offline_stitch_and_upload_timelapse(
+                experiment_id=experiment_id,
+                upload_immediately=upload_immediately,
+                cleanup_temp_files=cleanup_temp_files
+            )
+            
+            # Set tasks to completed
+            for task_name in matching_tasks:
+                await self._update_task_state_and_write_config(task_name, status="completed")
+            
+            return {"success": True, "message": f"Offline processing completed for {len(matching_tasks)} tasks", "result": result}
+            
+        except Exception as e:
+            logger.error(f"Offline processing failed for experiment_id {experiment_id}: {e}")
+            # Set tasks to error status
+            for task_name in matching_tasks:
+                await self._update_task_state_and_write_config(task_name, status="error")
+            return {"success": False, "message": str(e)}
 
 async def main():
     # parser = argparse.ArgumentParser(description='Run the Orchestration System.')
