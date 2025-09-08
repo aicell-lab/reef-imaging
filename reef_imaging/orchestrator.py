@@ -192,7 +192,11 @@ class OrchestrationSystem:
             # Determine actual status based on current pending_datetimes
             current_actual_status = persisted_status
             if not current_settings_config["pending_datetimes"]:
-                current_actual_status = "completed"
+                # Only set to completed if not currently uploading
+                if persisted_status != "uploading":
+                    current_actual_status = "completed"
+                else:
+                    current_actual_status = "uploading"  # Keep uploading status
             elif persisted_status == "completed" and current_settings_config["pending_datetimes"]:
                  # If file said completed, but now there are pending points (e.g. user added them)
                  current_actual_status = "pending" # Reset to pending
@@ -239,8 +243,9 @@ class OrchestrationSystem:
                             existing_task_data["status"] = "completed"
             
             # Final status check: if a task somehow ends up with status != completed but no pending_datetimes, fix it.
+            # But respect 'uploading' status - don't force it to completed
             task_state_dict = self.tasks[task_name]
-            if not task_state_dict["config"]["pending_datetimes"] and task_state_dict["status"] != "completed":
+            if not task_state_dict["config"]["pending_datetimes"] and task_state_dict["status"] not in ["completed", "uploading"]:
                 logger.warning(f"Task '{task_name}' has status '{task_state_dict['status']}' but no pending time points. Forcing to 'completed'.")
                 task_state_dict["status"] = "completed"
                 a_task_state_changed_for_write = True
@@ -369,6 +374,8 @@ class OrchestrationSystem:
                 logger.info(f"Task '{task_name}' has no more pending time points. Marking as completed.")
                 task_state["status"] = "completed"
                 changed = True
+            elif task_state["status"] == "uploading":
+                logger.info(f"Task '{task_name}' is uploading and has no pending time points. Keeping uploading status.")
         elif status == "completed" and task_config_internal["pending_datetimes"]:
             logger.warning(f"Task '{task_name}' set to completed, but still has pending points. Reverting to pending.")
             task_state["status"] = "pending"
@@ -458,7 +465,7 @@ class OrchestrationSystem:
                 reef_server = await connect_to_server({
                     "server_url": self.server_url,
                     "token": self.token_for_orchestrator_registration,
-                    "workspace": os.environ.get("REEF_LOCAL_WORKSPACE") if self.local else "reef-imaging",
+                    "workspace": os.environ.get("REEF_LOCAL_WORKSPACE", "reef-imaging"),
                     "ping_interval": None
                 })
                 self.robotic_arm = await reef_server.get_service(self.robotic_arm_id)
@@ -873,7 +880,7 @@ class OrchestrationSystem:
                 
                 if not pending_datetimes:
                     logger.debug(f"Task '{task_name}' skipped, no pending time points.")
-                    if status != "completed":
+                    if status not in ["completed", "uploading"]:
                         logger.warning(f"Task '{task_name}' has status '{status}' but no pending points. Marking completed.")
                         await self._update_task_state_and_write_config(task_name, status="completed")
                     continue
@@ -1187,13 +1194,21 @@ class OrchestrationSystem:
                      config_data["samples"] = []
 
                 task_exists_at_index = -1
+                existing_task_status = None
                 for i, existing_task in enumerate(config_data["samples"]):
                     if existing_task.get("name") == task_name:
                         task_exists_at_index = i
+                        existing_task_status = existing_task.get("operational_state", {}).get("status", "pending")
                         break
                 
+                # For existing tasks, preserve "uploading" status if it was uploading
+                final_status = current_status
+                if task_exists_at_index != -1 and existing_task_status == "uploading" and not has_pending:
+                    final_status = "uploading"  # Keep uploading status for existing tasks
+                    logger.info(f"Task '{task_name}' is currently uploading. Preserving uploading status.")
+                
                 op_state = {
-                    "status": current_status,
+                    "status": final_status,
                     "last_updated_by_orchestrator": datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
                 }
 
