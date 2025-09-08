@@ -462,15 +462,10 @@ class OrchestrationSystem:
                 elif not service_id_to_disconnect:
                     logger.warning("disconnect_single_service called for microscope without specifying ID. Cannot disconnect.")
             elif service_type == 'robotic_arm' and self.robotic_arm:
-                reef_server = await connect_to_server({
-                    "server_url": self.server_url,
-                    "token": self.token_for_orchestrator_registration,
-                    "workspace": os.environ.get("REEF_LOCAL_WORKSPACE", "reef-imaging"),
-                    "ping_interval": None
-                })
-                self.robotic_arm = await reef_server.get_service(self.robotic_arm_id)
-                logger.info(f"Robotic arm service ({self.robotic_arm_id}) reconnected successfully.")
-                await self._start_health_check('robotic_arm', self.robotic_arm) # Restart health check
+                logger.info(f"Disconnecting robotic arm service ({self.robotic_arm_id})...")
+                await self.robotic_arm.disconnect()
+                self.robotic_arm = None
+                logger.info(f"Robotic arm service ({self.robotic_arm_id}) disconnected.")
                 
         except Exception as e:
             logger.error(f"Error disconnecting {service_type} service ({service_id_to_disconnect if service_id_to_disconnect else ''}): {e}")
