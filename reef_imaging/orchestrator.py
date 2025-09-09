@@ -782,7 +782,7 @@ class OrchestrationSystem:
         """Run the complete load-scan-unload process for a given task on a specific microscope."""
         task_name = task_config["name"]
         incubator_slot = task_config["incubator_slot"]
-        action_id = f"{task_name.replace(' ', '_')}-{datetime.now().strftime('%Y%m%dT%H%M%S')}"
+        action_id = f"{task_name.replace(' ', '_')}"
         logger.info(f"Starting imaging cycle for task: {task_name} on microscope {allocated_microscope_id} with action_id: {action_id}")
 
         # Verify essential services (incubator, arm) are available - microscope_service is passed in and presumed connected by caller
