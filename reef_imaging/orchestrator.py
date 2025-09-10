@@ -112,8 +112,10 @@ class OrchestrationSystem:
             except FileNotFoundError:
                 logger.error(f"Configuration file {CONFIG_FILE_PATH} not found.")
                 raw_config_data = {"samples": []} 
-            except json.JSONDecodeError:
-                logger.error(f"Error decoding JSON from {CONFIG_FILE_PATH}. Will not update tasks from file this cycle.")
+            except (json.JSONDecodeError, OSError) as e:
+                logger.error(f"Error reading {CONFIG_FILE_PATH}: {e}. Will not update tasks from file this cycle.")
+                # Add a small delay to prevent rapid retries on file system errors
+                await asyncio.sleep(1)
                 return 
 
         current_time_naive = datetime.now() # Used for intelligent flag setting, not scheduling here
@@ -295,8 +297,8 @@ class OrchestrationSystem:
                     for key, value in existing_data.items():
                         if key != "samples":
                             output_config_data[key] = value
-            except (FileNotFoundError, json.JSONDecodeError):
-                 logger.warning(f"Could not re-read {CONFIG_FILE_PATH} before writing, or it was missing/corrupt. Will create/overwrite with current task data only.")
+            except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+                 logger.warning(f"Could not re-read {CONFIG_FILE_PATH} before writing: {e}. Will create/overwrite with current task data only.")
 
             for task_name, task_data_internal in self.tasks.items():
                 settings_to_write = copy.deepcopy(task_data_internal.get("_raw_settings_from_input", {}))
@@ -340,7 +342,7 @@ class OrchestrationSystem:
             try:
                 with open(CONFIG_FILE_PATH, 'w') as f_write:
                     json.dump(output_config_data, f_write, indent=4)
-            except IOError as e:
+            except (IOError, OSError) as e:
                 logger.error(f"Error writing tasks state to {CONFIG_FILE_PATH}: {e}")
                 
     async def _update_task_state_and_write_config(self, task_name, status=None, current_tp_to_move_to_imaged: datetime = None):
@@ -1182,8 +1184,8 @@ class OrchestrationSystem:
                         config_data = json.load(f)
                 except FileNotFoundError:
                     logger.warning(f"{CONFIG_FILE_PATH} not found. Will create a new one.")
-                except json.JSONDecodeError:
-                    logger.warning(f"{CONFIG_FILE_PATH} is corrupted. Will create a new one.")
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(f"{CONFIG_FILE_PATH} is corrupted or unreadable: {e}. Will create a new one.")
                 
                 if "samples" not in config_data or not isinstance(config_data["samples"], list):
                      config_data["samples"] = []
