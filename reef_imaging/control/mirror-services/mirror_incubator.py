@@ -64,7 +64,7 @@ class MirrorIncubatorService:
             self.local_server = await connect_to_server({
                 "server_url": self.local_server_url, 
                 "token": self.local_token,
-                "ping_interval": None
+                "ping_interval": 30
             })
             
             # Connect to the local service
@@ -305,7 +305,7 @@ class MirrorIncubatorService:
             "server_url": self.cloud_server_url, 
             "token": self.cloud_token, 
             "workspace": self.cloud_workspace,
-            "ping_interval": None
+            "ping_interval": 30
         })
         
         # Connect to local service first (needed to get available methods)

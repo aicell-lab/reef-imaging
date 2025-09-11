@@ -137,13 +137,13 @@ class RoboticArmService:
     async def setup(self):
         if self.local:
             token = os.environ.get("REEF_LOCAL_TOKEN")
-            server = await connect_to_server({"server_url": self.server_url, "token": token, "ping_interval": None})
+            server = await connect_to_server({"server_url": self.server_url, "token": token, "ping_interval": 30})
         else:
             try:
                 token = os.environ.get("REEF_WORKSPACE_TOKEN")
             except:
                 token = await login({"server_url": self.server_url})
-            server = await connect_to_server({"server_url": self.server_url, "token": token, "workspace": "reef-imaging", "ping_interval": None})
+            server = await connect_to_server({"server_url": self.server_url, "token": token, "workspace": "reef-imaging", "ping_interval": 30})
 
         self.server = server
         await self.start_hypha_service(server)

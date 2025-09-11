@@ -66,7 +66,7 @@ class IncubatorService:
         self.local = local
         self.simulation = simulation
         self.server_url = "http://localhost:9527" if local else "https://hypha.aicell.io"
-        self.c = Cytomat("/dev/ttyUSB1") if not simulation else None
+        self.c = Cytomat("/dev/ttyUSB1", json_path="/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/docs/config.json") if not simulation else None
         self.samples_file = "/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/samples.json"
         self.server = None
         self.service_id = "incubator-control" + ("-simulation" if simulation else "")
@@ -159,13 +159,13 @@ class IncubatorService:
             self.c.maintenance_controller.reset_error_status()
         if self.local:
             token = os.environ.get("REEF_LOCAL_TOKEN")
-            server = await connect_to_server({"server_url": self.server_url, "token": token, "ping_interval": None})
+            server = await connect_to_server({"server_url": self.server_url, "token": token, "ping_interval": 30})
         else:
             try:
                 token = os.environ.get("REEF_WORKSPACE_TOKEN")
             except:
                 token = await login({"server_url": self.server_url})
-            server = await connect_to_server({"server_url": self.server_url, "token": token, "workspace": "reef-imaging", "ping_interval": None})
+            server = await connect_to_server({"server_url": self.server_url, "token": token, "workspace": "reef-imaging", "ping_interval": 30})
 
         await self.start_hypha_service(server)
 
