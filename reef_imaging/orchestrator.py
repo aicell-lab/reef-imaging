@@ -71,6 +71,7 @@ class OrchestrationSystem:
 
         self.tasks = {} # Stores task configurations and states
         self.health_check_tasks = {} # Stores asyncio tasks for health checks, keyed by (service_type, service_id)
+        self.connection_tasks = {} # Stores asyncio tasks for connections, keyed by service identifier
         self.active_task_name = None # Name of the task currently being processed or None
         self._config_lock = asyncio.Lock()
 
@@ -447,6 +448,17 @@ class OrchestrationSystem:
         if actual_service_id: # Only stop health check if we have a valid ID for it
              await self._stop_health_check(service_type, actual_service_id) # Stop health check first
 
+        # Cancel any existing connection tasks for this service
+        connection_key = f"{service_type}_{actual_service_id}" if actual_service_id else service_type
+        if connection_key in self.connection_tasks:
+            task = self.connection_tasks.pop(connection_key)
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"Cancelled connection task for {service_type} ({actual_service_id})")
+
         try:
             if service_type == 'incubator' and self.incubator:
                 logger.info(f"Disconnecting incubator service ({self.incubator_id})...")
@@ -472,8 +484,58 @@ class OrchestrationSystem:
         except Exception as e:
             logger.error(f"Error disconnecting {service_type} service ({service_id_to_disconnect if service_id_to_disconnect else ''}): {e}")
 
+    async def _connect_service_task(self, service_type, service_id_to_reconnect=None):
+        """Task to handle service connection."""
+        operational_token = os.environ.get("REEF_LOCAL_TOKEN")
+        operational_workspace = os.environ.get("REEF_LOCAL_WORKSPACE")
+        
+        if service_type == 'incubator':
+            reef_server = await connect_to_server({
+                "server_url": self.server_url, 
+                "token": operational_token,
+                "workspace": operational_workspace,
+                "ping_interval": None
+            })
+            self.incubator = await reef_server.get_service(self.incubator_id)
+            logger.info(f"Incubator service ({self.incubator_id}) reconnected successfully locally.")
+            await self._start_health_check('incubator', self.incubator, self.incubator_id)
+                
+        elif service_type == 'microscope':
+            if not service_id_to_reconnect:
+                logger.error("Cannot reconnect microscope: service_id_to_reconnect is not provided.")
+                return
+            if service_id_to_reconnect in self.microscope_services:
+                logger.warning(f"Microscope {service_id_to_reconnect} already connected during reconnect attempt. Skipping.")
+                return
+
+            if service_id_to_reconnect not in self.configured_microscopes_info:
+                logger.error(f"Cannot reconnect microscope {service_id_to_reconnect}: no longer in configuration.")
+                return
+
+            squid_server = await connect_to_server({
+                "server_url": self.server_url, 
+                "token": operational_token, 
+                "workspace": operational_workspace, 
+                "ping_interval": None
+            })
+            microscope_service_instance = await squid_server.get_service(service_id_to_reconnect)
+            self.microscope_services[service_id_to_reconnect] = microscope_service_instance
+            logger.info(f"Microscope service ({service_id_to_reconnect}) reconnected successfully locally.")
+            await self._start_health_check('microscope', microscope_service_instance, service_id_to_reconnect)
+                
+        elif service_type == 'robotic_arm':
+            reef_server = await connect_to_server({
+                "server_url": self.server_url, 
+                "token": operational_token,
+                "workspace": operational_workspace,
+                "ping_interval": None
+            })
+            self.robotic_arm = await reef_server.get_service(self.robotic_arm_id)
+            logger.info(f"Robotic arm service ({self.robotic_arm_id}) reconnected successfully locally.")
+            await self._start_health_check('robotic_arm', self.robotic_arm, self.robotic_arm_id)
+
     async def reconnect_single_service(self, service_type, service_id_to_reconnect=None): # MODIFIED signature
-        """Reconnect a specific service."""
+        """Reconnect a specific service using asyncio task."""
         try:
             operational_token = os.environ.get("REEF_LOCAL_TOKEN")
             operational_workspace = os.environ.get("REEF_LOCAL_WORKSPACE")
@@ -485,56 +547,19 @@ class OrchestrationSystem:
                 logger.error(f"REEF_LOCAL_WORKSPACE not set. Cannot reconnect local service {service_type} ({service_id_to_reconnect}).")
                 return
             
-            if service_type == 'incubator':
-                if self.incubator: 
-                    logger.warning("Incubator already connected during reconnect attempt. Skipping.")
-                    return
-                reef_server = await connect_to_server({
-                    "server_url": self.server_url, 
-                    "token": operational_token,
-                    "workspace": operational_workspace,
-                    "ping_interval": None
-                })
-                self.incubator = await reef_server.get_service(self.incubator_id)
-                logger.info(f"Incubator service ({self.incubator_id}) reconnected successfully locally.")
-                await self._start_health_check('incubator', self.incubator, self.incubator_id)
-                
-            elif service_type == 'microscope':
-                if not service_id_to_reconnect:
-                    logger.error("Cannot reconnect microscope: service_id_to_reconnect is not provided.")
-                    return
-                if service_id_to_reconnect in self.microscope_services:
-                    logger.warning(f"Microscope {service_id_to_reconnect} already connected during reconnect attempt. Skipping.")
-                    return
-
-                if service_id_to_reconnect not in self.configured_microscopes_info:
-                    logger.error(f"Cannot reconnect microscope {service_id_to_reconnect}: no longer in configuration.")
-                    return
-
-                squid_server = await connect_to_server({
-                    "server_url": self.server_url, 
-                    "token": operational_token, 
-                    "workspace": operational_workspace, 
-                    "ping_interval": None
-                })
-                microscope_service_instance = await squid_server.get_service(service_id_to_reconnect)
-                self.microscope_services[service_id_to_reconnect] = microscope_service_instance
-                logger.info(f"Microscope service ({service_id_to_reconnect}) reconnected successfully locally.")
-                await self._start_health_check('microscope', microscope_service_instance, service_id_to_reconnect)
-                
-            elif service_type == 'robotic_arm':
-                if self.robotic_arm: 
-                    logger.warning("Robotic arm already connected during reconnect attempt. Skipping.")
-                    return
-                reef_server = await connect_to_server({
-                    "server_url": self.server_url, 
-                    "token": operational_token,
-                    "workspace": operational_workspace,
-                    "ping_interval": None
-                })
-                self.robotic_arm = await reef_server.get_service(self.robotic_arm_id)
-                logger.info(f"Robotic arm service ({self.robotic_arm_id}) reconnected successfully locally.")
-                await self._start_health_check('robotic_arm', self.robotic_arm, self.robotic_arm_id)
+            # Check if service is already connected
+            if service_type == 'incubator' and self.incubator:
+                logger.warning("Incubator already connected during reconnect attempt. Skipping.")
+                return
+            elif service_type == 'robotic_arm' and self.robotic_arm:
+                logger.warning("Robotic arm already connected during reconnect attempt. Skipping.")
+                return
+            
+            # Create and store connection task
+            connection_key = f"{service_type}_{service_id_to_reconnect}" if service_id_to_reconnect else f"{service_type}_{self.incubator_id if service_type == 'incubator' else self.robotic_arm_id}"
+            task = asyncio.create_task(self._connect_service_task(service_type, service_id_to_reconnect))
+            self.connection_tasks[connection_key] = task
+            await task
                 
         except Exception as e:
             logger.error(f"Error reconnecting local {service_type} service ({service_id_to_reconnect if service_id_to_reconnect else ''}): {e}")
@@ -633,6 +658,16 @@ class OrchestrationSystem:
     async def disconnect_services(self):
         """Disconnect from all services and stop their health checks."""
         logger.info("Disconnecting all services...")
+        
+        # Cancel all remaining connection tasks
+        for connection_key, task in list(self.connection_tasks.items()):
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"Cancelled connection task: {connection_key}")
+        self.connection_tasks.clear()
         
         # Disconnect Incubator
         if self.incubator:
