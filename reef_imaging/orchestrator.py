@@ -494,7 +494,7 @@ class OrchestrationSystem:
                 "server_url": self.server_url, 
                 "token": operational_token,
                 "workspace": operational_workspace,
-                "ping_interval": None
+                "ping_interval": 30
             })
             self.incubator = await reef_server.get_service(self.incubator_id)
             logger.info(f"Incubator service ({self.incubator_id}) reconnected successfully locally.")
@@ -516,7 +516,7 @@ class OrchestrationSystem:
                 "server_url": self.server_url, 
                 "token": operational_token, 
                 "workspace": operational_workspace, 
-                "ping_interval": None
+                "ping_interval": 30
             })
             microscope_service_instance = await squid_server.get_service(service_id_to_reconnect)
             self.microscope_services[service_id_to_reconnect] = microscope_service_instance
@@ -528,7 +528,7 @@ class OrchestrationSystem:
                 "server_url": self.server_url, 
                 "token": operational_token,
                 "workspace": operational_workspace,
-                "ping_interval": None
+                "ping_interval": 30
             })
             self.robotic_arm = await reef_server.get_service(self.robotic_arm_id)
             logger.info(f"Robotic arm service ({self.robotic_arm_id}) reconnected successfully locally.")
@@ -582,7 +582,7 @@ class OrchestrationSystem:
                 "server_url": self.server_url, 
                 "token": operational_token,
                 "workspace": operational_workspace,
-                "ping_interval": None
+                "ping_interval": 30
             })
             if not self.incubator:
                 self.incubator = await reef_server.get_service(self.incubator_id)
@@ -613,7 +613,7 @@ class OrchestrationSystem:
                         "server_url": self.server_url, 
                         "token": operational_token,
                         "workspace": operational_workspace, # MODIFIED: Always use operational_workspace
-                        "ping_interval": None
+                        "ping_interval": 30
                     })
                     logger.debug(f"Successfully connected to SQUID server for microscope {mic_id}")
                     
@@ -1106,7 +1106,7 @@ class OrchestrationSystem:
 
         server_config_for_registration = {
             "server_url": self.orchestrator_hypha_server_url,
-            "ping_interval": None,
+            "ping_interval": 30,
             "workspace": self.workspace,
             "token": self.token_for_orchestrator_registration
         }
