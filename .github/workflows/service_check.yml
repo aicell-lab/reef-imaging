@@ -15,21 +15,21 @@ jobs:
 
     - name: Check Incubator Control Service
       run: |
-        response=$(curl -s -f https://hypha.aicell.io/reef-imaging/services/mirror-incubator-control/ping || echo "Service unreachable")
+        response=$(curl -s -f -H "Authorization: Bearer ${{ secrets.REEF_WORKSPACE_TOKEN }}" https://hypha.aicell.io/reef-imaging/services/mirror-incubator-control/ping || echo "Service unreachable")
         if [[ "$response" != "pong" && "$response" != "\"pong\"" ]]; then
           echo "Incubator Control Service is down: $response" >> error.log
         fi
 
     - name: Check Microscope Control Service
       run: |
-        response=$(curl -s -f https://hypha.aicell.io/reef-imaging/services/mirror-microscope-control-squid-1/ping || echo "Service unreachable")
+        response=$(curl -s -f -H "Authorization: Bearer ${{ secrets.REEF_WORKSPACE_TOKEN }}" https://hypha.aicell.io/reef-imaging/services/mirror-microscope-control-squid-1/ping || echo "Service unreachable")
         if [[ "$response" != "pong" && "$response" != "\"pong\"" ]]; then
           echo "Microscope Control Service is down: $response" >> error.log
         fi
 
     - name: Check Robotic Arm Control Service
       run: |
-        response=$(curl -s -f https://hypha.aicell.io/reef-imaging/services/mirror-robotic-arm-control/ping || echo "Service unreachable")
+        response=$(curl -s -f -H "Authorization: Bearer ${{ secrets.REEF_WORKSPACE_TOKEN }}" https://hypha.aicell.io/reef-imaging/services/mirror-robotic-arm-control/ping || echo "Service unreachable")
         if [[ "$response" != "pong" && "$response" != "\"pong\"" ]]; then
           echo "Robotic Arm Control Service is down: $response" >> error.log
         fi
