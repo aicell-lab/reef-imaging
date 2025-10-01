@@ -62,11 +62,14 @@ def setup_logging(log_file="incubator_service.log", max_bytes=100000, backup_cou
 logger = setup_logging()
 
 class IncubatorService:
-    def __init__(self, local, simulation=False):
+    def __init__(self, local, simulation=False, serial_port=None):
         self.local = local
         self.simulation = simulation
         self.server_url = "http://localhost:9527" if local else "https://hypha.aicell.io"
-        self.c = Cytomat("/dev/ttyUSB1", json_path="/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/docs/config.json") if not simulation else None
+        # Use provided port, environment variable, or default to /dev/ttyUSB0
+        port = serial_port or os.environ.get("CYPOMAT_SERIAL_PORT", "/dev/ttyUSB0")
+        logger.info(f"Using serial port: {port}")
+        self.c = Cytomat(port, json_path="/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/docs/config.json") if not simulation else None
         self.samples_file = "/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/samples.json"
         self.server = None
         self.service_id = "incubator-control" + ("-simulation" if simulation else "")
@@ -557,9 +560,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start the Hypha service for the incubator.")
     parser.add_argument('--local', action='store_true', help="Use localhost as server URL")
     parser.add_argument('--simulation', action='store_true', help="Run in simulation mode")
+    parser.add_argument('--serial-port', type=str, help="Serial port for Cytomat (e.g., /dev/ttyUSB0)")
     args = parser.parse_args()
 
-    incubator_service = IncubatorService(local=args.local, simulation=args.simulation)
+    incubator_service = IncubatorService(local=args.local, simulation=args.simulation, serial_port=args.serial_port)
 
     loop = asyncio.get_event_loop()
 
