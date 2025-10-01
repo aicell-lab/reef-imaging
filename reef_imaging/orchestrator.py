@@ -462,14 +462,14 @@ class OrchestrationSystem:
         try:
             if service_type == 'incubator' and self.incubator:
                 logger.info(f"Disconnecting incubator service ({self.incubator_id})...")
-                await self.incubator.disconnect()
+                # Service proxies don't have disconnect() method - just clear the reference
                 self.incubator = None
                 logger.info(f"Incubator service ({self.incubator_id}) disconnected.")
             elif service_type == 'microscope':
                 if service_id_to_disconnect and service_id_to_disconnect in self.microscope_services:
                     logger.info(f"Disconnecting microscope service ({service_id_to_disconnect})...")
-                    mic_service = self.microscope_services.pop(service_id_to_disconnect)
-                    await mic_service.disconnect()
+                    # Service proxies don't have disconnect() method - just remove from dict
+                    self.microscope_services.pop(service_id_to_disconnect)
                     if service_id_to_disconnect in self.sample_on_microscope_flags: # Keep flag consistent
                         self.sample_on_microscope_flags[service_id_to_disconnect] = False 
                     logger.info(f"Microscope service ({service_id_to_disconnect}) disconnected.")
@@ -477,7 +477,7 @@ class OrchestrationSystem:
                     logger.warning("disconnect_single_service called for microscope without specifying ID. Cannot disconnect.")
             elif service_type == 'robotic_arm' and self.robotic_arm:
                 logger.info(f"Disconnecting robotic arm service ({self.robotic_arm_id})...")
-                await self.robotic_arm.disconnect()
+                # Service proxies don't have disconnect() method - just clear the reference
                 self.robotic_arm = None
                 logger.info(f"Robotic arm service ({self.robotic_arm_id}) disconnected.")
                 
