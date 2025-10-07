@@ -1121,7 +1121,7 @@ class OrchestrationSystem:
                 "visibility": "protected", 
                 "run_in_executor": True,
             },
-            "hello_orchestrator": self.hello_orchestrator,
+            "ping": self.ping,
             "add_imaging_task": self.add_imaging_task,
             "delete_imaging_task": self.delete_imaging_task,
             "get_all_imaging_tasks": self.get_all_imaging_tasks,
@@ -1138,10 +1138,10 @@ class OrchestrationSystem:
         await self._start_transport_worker()
 
     @schema_function(skip_self=True)
-    async def hello_orchestrator(self):
-        """Returns a hello message from the orchestrator."""
-        logger.info("hello_orchestrator service method called.")
-        return "Hello from the Orchestrator!"
+    async def ping(self):
+        """Returns pong for health checks."""
+        logger.info("ping service method called.")
+        return "pong"
 
     @schema_function(skip_self=True)
     async def add_imaging_task(self, task_definition: dict):

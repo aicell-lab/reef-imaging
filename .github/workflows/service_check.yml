@@ -39,9 +39,9 @@ jobs:
 
     - name: Check Orchestrator Manager Service
       run: |
-        response=$(curl -s -H "Authorization: Bearer ${{ secrets.REEF_WORKSPACE_TOKEN }}" https://hypha.aicell.io/reef-imaging/services/orchestrator-manager/hello_orchestrator)
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${{ secrets.REEF_WORKSPACE_TOKEN }}" https://hypha.aicell.io/reef-imaging/services/orchestrator-manager/hello_orchestrator)
-        if [[ "$http_code" != "200" || "$response" != *"Hello from the Orchestrator"* ]]; then
+        response=$(curl -s -H "Authorization: Bearer ${{ secrets.REEF_WORKSPACE_TOKEN }}" https://hypha.aicell.io/reef-imaging/services/orchestrator-manager/ping)
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${{ secrets.REEF_WORKSPACE_TOKEN }}" https://hypha.aicell.io/reef-imaging/services/orchestrator-manager/ping)
+        if [[ "$http_code" != "200" || "$response" != "pong" && "$response" != "\"pong\"" ]]; then
           echo "Orchestrator Manager Service is down (HTTP $http_code): $response" >> error.log
         fi
         
