@@ -716,13 +716,15 @@ class OrchestrationSystem:
         logger.info(f"Loading sample from incubator slot {incubator_slot} to microscope {microscope_id_str}...")
         
         try:
-            # Determine the robot arm's target microscope ID (e.g., 1 or 2)
+            # Determine the robot arm's target microscope ID (e.g., 1, 2, or 3)
             # This logic might need to be more robust or configurable
             robot_microscope_target_id = 1 
             if microscope_id_str.endswith('2'):
                 robot_microscope_target_id = 2
             elif microscope_id_str.endswith('1'):
                 robot_microscope_target_id = 1
+            elif 'squid+1' in microscope_id_str:
+                robot_microscope_target_id = 3  # squid+1 microscope
             # Add more sophisticated mapping if microscope IDs are not simply ending with 1 or 2
             else:
                 logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1. This might be incorrect.")
@@ -783,12 +785,14 @@ class OrchestrationSystem:
         logger.info(f"Unloading sample to incubator slot {incubator_slot} from microscope {microscope_id_str}...")
 
         try:
-            # Determine the robot arm's target microscope ID (e.g., 1 or 2)
+            # Determine the robot arm's target microscope ID (e.g., 1, 2, or 3)
             robot_microscope_target_id = 1
             if microscope_id_str.endswith('2'):
                 robot_microscope_target_id = 2
             elif microscope_id_str.endswith('1'):
                 robot_microscope_target_id = 1
+            elif 'squid+1' in microscope_id_str:
+                robot_microscope_target_id = 3  # squid+1 microscope
             else:
                 logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1. This might be incorrect.")
 

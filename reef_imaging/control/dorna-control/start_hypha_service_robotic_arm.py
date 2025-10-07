@@ -392,6 +392,11 @@ class RoboticArmService:
                 self.play_script("paths/transport_from_incubator_to_microscope2.txt")
                 self.play_script("paths/put_on_microscope2.txt")
                 logger.info(f"Sample moved from incubator to microscope 2")
+            elif microscope_id == 3:  # squid+1 microscope
+                self.play_script("paths/grab_from_incubator.txt")
+                self.play_script("paths/transport_from_incubator_to_squid+1.txt")
+                self.play_script("paths/put_on_squid+1.txt")
+                logger.info(f"Sample moved from incubator to squid+1 microscope")
             else:
                 logger.error(f"Invalid microscope ID: {microscope_id}")
                 raise Exception(f"Invalid microscope ID: {microscope_id}")
@@ -421,6 +426,11 @@ class RoboticArmService:
                 self.play_script("paths/transport_from_microscope2_to_incubator.txt")
                 self.play_script("paths/put_on_incubator.txt")
                 logger.info(f"Sample moved from microscope 2 to incubator")
+            elif microscope_id == 3:  # squid+1 microscope
+                self.play_script("paths/grab_from_squid+1.txt")
+                self.play_script("paths/transport_from_squid+1_to_incubator.txt")
+                self.play_script("paths/put_on_incubator.txt")
+                logger.info(f"Sample moved from squid+1 microscope to incubator")
             else:
                 logger.error(f"Invalid microscope ID: {microscope_id}")
                 raise Exception(f"Invalid microscope ID: {microscope_id}")
@@ -607,7 +617,11 @@ class RoboticArmService:
             "transport_from_incubator_to_microscope1": "paths/transport_from_incubator_to_microscope1.txt",
             "transport_from_microscope1_to_incubator": "paths/transport_from_microscope1_to_incubator.txt",
             "incubator_to_microscope1": "paths/incubator_to_microscope1.txt",
-            "microscope1_to_incubator": "paths/microscope1_to_incubator.txt"
+            "microscope1_to_incubator": "paths/microscope1_to_incubator.txt",
+            "put_on_squid+1": "paths/put_on_squid+1.txt",
+            "grab_from_squid+1": "paths/grab_from_squid+1.txt",
+            "transport_from_incubator_to_squid+1": "paths/transport_from_incubator_to_squid+1.txt",
+            "transport_from_squid+1_to_incubator": "paths/transport_from_squid+1_to_incubator.txt"
         }
         
         if action_id not in action_to_script:
