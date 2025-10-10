@@ -723,7 +723,7 @@ class OrchestrationSystem:
                 robot_microscope_target_id = 2
             elif microscope_id_str.endswith('1'):
                 robot_microscope_target_id = 1
-            elif 'squid+1' in microscope_id_str:
+            elif 'squid+1' in microscope_id_str or 'squid-plus-1' in microscope_id_str:
                 robot_microscope_target_id = 3  # squid+1 microscope
             # Add more sophisticated mapping if microscope IDs are not simply ending with 1 or 2
             else:
@@ -791,7 +791,7 @@ class OrchestrationSystem:
                 robot_microscope_target_id = 2
             elif microscope_id_str.endswith('1'):
                 robot_microscope_target_id = 1
-            elif 'squid+1' in microscope_id_str:
+            elif 'squid+1' in microscope_id_str or 'squid-plus-1' in microscope_id_str:
                 robot_microscope_target_id = 3  # squid+1 microscope
             else:
                 logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1. This might be incorrect.")
