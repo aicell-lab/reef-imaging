@@ -777,25 +777,41 @@ class OrchestrationSystem:
             logger.error(error_msg)
             raise Exception(error_msg)
 
+        # Determine the robot arm's target microscope ID first (needed for location check)
+        robot_microscope_target_id = 1
+        if 'squid+1' in microscope_id_str or 'squid-plus-1' in microscope_id_str:
+            robot_microscope_target_id = 3  # squid+1 microscope
+        elif microscope_id_str.endswith('2'):
+            robot_microscope_target_id = 2
+        elif microscope_id_str.endswith('1'):
+            robot_microscope_target_id = 1
+        else:
+            logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1. This might be incorrect.")
+
+        # Check actual sample location from incubator service to verify if sample is on microscope
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
+            
+            # Update flag based on actual location
+            expected_microscope_location = f"microscope{robot_microscope_target_id}"
+            if actual_location == expected_microscope_location:
+                self.sample_on_microscope_flags[microscope_id_str] = True
+                logger.info(f"Updated sample_on_microscope_flags[{microscope_id_str}] to True based on incubator location")
+            elif actual_location == "incubator_slot":
+                self.sample_on_microscope_flags[microscope_id_str] = False
+                logger.info(f"Sample already in incubator slot {incubator_slot}, no unload needed")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding with unload based on flag.")
+
         if not self.sample_on_microscope_flags.get(microscope_id_str, False):
-            logger.info(f"Sample plate not on microscope {microscope_id_str}")
+            logger.info(f"Sample plate not on microscope {microscope_id_str} according to flags")
             return 
             
         logger.info(f"Unloading sample to incubator slot {incubator_slot} from microscope {microscope_id_str}...")
 
         try:
-            # Determine the robot arm's target microscope ID (e.g., 1, 2, or 3)
-            # Check for specific patterns first, then generic endings
-            robot_microscope_target_id = 1
-            if 'squid+1' in microscope_id_str or 'squid-plus-1' in microscope_id_str:
-                robot_microscope_target_id = 3  # squid+1 microscope
-            elif microscope_id_str.endswith('2'):
-                robot_microscope_target_id = 2
-            elif microscope_id_str.endswith('1'):
-                robot_microscope_target_id = 1
-            else:
-                logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1. This might be incorrect.")
-
             # Home microscope stage
             await target_microscope_service.home_stage()
             
