@@ -157,6 +157,8 @@ class OrchestrationSystem:
                     "imaging_zone": settings["imaging_zone"],
                     "Nx": settings["Nx"],
                     "Ny": settings["Ny"],
+                    "dx": settings.get("dx", 0.8),  # Default to 0.8 if not specified
+                    "dy": settings.get("dy", 0.8),  # Default to 0.8 if not specified
                     "illumination_settings": settings["illumination_settings"],
                     "do_contrast_autofocus": settings["do_contrast_autofocus"],
                     "do_reflection_af": settings["do_reflection_af"],
@@ -883,6 +885,8 @@ class OrchestrationSystem:
                 scanning_zone=task_config["imaging_zone"],
                 Nx=task_config["Nx"],
                 Ny=task_config["Ny"],
+                dx=task_config["dx"],
+                dy=task_config["dy"],
                 action_ID=action_id,
             )
             
