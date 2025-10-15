@@ -154,6 +154,15 @@ class IncubatorService:
         id = svc.id.split(":")[1]
         logger.info(f"You can also test the service via the HTTP proxy: {self.server_url}/{server.config.workspace}/services/{id}/initialize")
 
+        # Reset error status when service starts up
+        try:
+            logger.info("Resetting error status on service startup...")
+            self.reset_error_status()
+            logger.info("Error status reset successfully")
+        except Exception as e:
+            logger.error(f"Failed to reset error status on startup: {e}")
+            # Don't raise the exception to prevent service startup failure
+
         # Start the health check task
         #asyncio.create_task(self.check_service_health())
 
@@ -265,7 +274,7 @@ class IncubatorService:
                 self.c.maintenance_controller.reset_error_status()
             else:
                 time.sleep(10)
-            return temperature
+            return "Error status reset successfully"
         except Exception as e:
             logger.error(f"Failed to reset error status: {e}")
             raise e
