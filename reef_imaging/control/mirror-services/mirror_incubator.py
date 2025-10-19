@@ -280,7 +280,7 @@ class MirrorIncubatorService:
                 "visibility": "protected",
                 "run_in_executor": True
             },
-            "type": "echo",
+            "type": "service",
         }
         
         # Add all mirrored methods to the service configuration
