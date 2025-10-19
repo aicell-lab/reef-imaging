@@ -164,6 +164,7 @@ class OrchestrationSystem:
                     "Ny": settings["Ny"],
                     "dx": settings.get("dx", 0.8),  # Default to 0.8 if not specified
                     "dy": settings.get("dy", 0.8),  # Default to 0.8 if not specified
+                    "scan_timeout_minutes": settings.get("scan_timeout_minutes", 40),  # Default to 40 minutes if not specified
                     "illumination_settings": settings["illumination_settings"],
                     "do_contrast_autofocus": settings["do_contrast_autofocus"],
                     "do_reflection_af": settings["do_reflection_af"],
@@ -801,6 +802,107 @@ class OrchestrationSystem:
             self.in_critical_operation = False
             logger.info("CRITICAL OPERATION END: Robotic arm unload complete")
 
+    async def _poll_scan_status(self, microscope_service, timeout_minutes=40):
+        """
+        Poll the scan status from microscope service using scan_get_status().
+        
+        This method continuously polls the microscope service every 10 seconds to check
+        the scan progress. It handles WebSocket interruptions gracefully by retrying
+        failed status checks.
+        
+        Args:
+            microscope_service: The microscope service proxy to poll
+            timeout_minutes: Maximum time in minutes to wait for scan completion (default: 40)
+            
+        Returns:
+            None when scan completes successfully
+            
+        Raises:
+            TimeoutError: If scan doesn't complete within timeout_minutes
+            Exception: If scan fails or encounters an error
+        """
+        poll_interval = 10  # seconds between status checks
+        timeout_seconds = timeout_minutes * 60
+        start_time = time.time()
+        last_progress = -1
+        consecutive_failures = 0
+        max_consecutive_failures = 3
+        
+        logger.info(f"Starting scan status polling (timeout: {timeout_minutes} minutes, interval: {poll_interval}s)")
+        
+        while True:
+            elapsed_time = time.time() - start_time
+            
+            # Check timeout
+            if elapsed_time > timeout_seconds:
+                error_msg = f"Scan operation timed out after {timeout_minutes} minutes"
+                logger.error(error_msg)
+                raise TimeoutError(error_msg)
+            
+            try:
+                # Poll status from microscope service
+                status_response = await asyncio.wait_for(
+                    microscope_service.scan_get_status(),
+                    timeout=15  # Give extra time for the RPC call itself
+                )
+                
+                # Reset failure counter on successful poll
+                consecutive_failures = 0
+                
+                # Extract status information
+                status = status_response.get("status", "unknown")
+                progress = status_response.get("progress", 0)
+                current_well = status_response.get("current_well", "N/A")
+                message = status_response.get("message", "")
+                
+                # Log progress if it has changed
+                if progress != last_progress:
+                    logger.info(f"Scan progress: {progress}% (well: {current_well}) - {message}")
+                    last_progress = progress
+                
+                # Check terminal states
+                if status == "completed":
+                    logger.info("Scan completed successfully")
+                    return
+                
+                elif status == "failed":
+                    error = status_response.get("error", "Unknown error")
+                    error_msg = f"Scan failed: {error}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                
+                elif status == "running":
+                    # Continue polling
+                    await asyncio.sleep(poll_interval)
+                
+                else:
+                    logger.warning(f"Unknown scan status: {status}. Continuing to poll...")
+                    await asyncio.sleep(poll_interval)
+                    
+            except asyncio.TimeoutError:
+                consecutive_failures += 1
+                logger.warning(f"Status poll timed out (attempt {consecutive_failures}/{max_consecutive_failures})")
+                
+                if consecutive_failures >= max_consecutive_failures:
+                    error_msg = f"Failed to get scan status after {max_consecutive_failures} consecutive attempts"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                
+                # Wait a bit before retrying
+                await asyncio.sleep(poll_interval)
+                
+            except Exception as e:
+                consecutive_failures += 1
+                logger.warning(f"Error polling scan status (attempt {consecutive_failures}/{max_consecutive_failures}): {e}")
+                
+                if consecutive_failures >= max_consecutive_failures:
+                    error_msg = f"Failed to poll scan status after {max_consecutive_failures} consecutive attempts: {e}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                
+                # Wait before retrying
+                await asyncio.sleep(poll_interval)
+
     async def run_cycle(self, task_config, microscope_service, allocated_microscope_id): # MODIFIED: added microscope_service, allocated_microscope_id
         """Run the complete load-scan-unload process for a given task on a specific microscope."""
         task_name = task_config["name"]
@@ -845,8 +947,13 @@ class OrchestrationSystem:
             logger.info("CRITICAL OPERATION START: Microscope scanning well plate")
             
             try:
-                # Scan with the provided microscope_service using well plate type from incubator
-                await microscope_service.scan_well_plate(
+                # Get scan timeout from task config (default 40 minutes)
+                scan_timeout_minutes = task_config.get("scan_timeout_minutes", 40)
+                logger.info(f"Starting scan with timeout of {scan_timeout_minutes} minutes")
+                
+                # Start scan using new unified API (one-shot call)
+                scan_result = await microscope_service.scan_start(
+                    saved_data_type="raw_images",
                     well_plate_type=well_plate_type,
                     illumination_settings=task_config["illumination_settings"],
                     do_contrast_autofocus=task_config["do_contrast_autofocus"],
@@ -858,6 +965,14 @@ class OrchestrationSystem:
                     dy=task_config["dy"],
                     action_ID=action_id,
                 )
+                logger.info(f"Scan initiated successfully: {scan_result}")
+                
+                # Poll scan status until completion or timeout
+                await self._poll_scan_status(
+                    microscope_service=microscope_service,
+                    timeout_minutes=scan_timeout_minutes
+                )
+                
             finally:
                 # Always reset critical operation flag after scanning
                 self.in_critical_operation = False
