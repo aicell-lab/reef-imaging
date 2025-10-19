@@ -1240,7 +1240,7 @@ class OrchestrationSystem:
             "load_plate_from_incubator_to_microscope": self.load_plate_from_incubator_to_microscope_api,
             "unload_plate_from_microscope": self.unload_plate_from_microscope_api,
             "get_transport_queue_status": self.get_transport_queue_status,
-            "offline_stitch_and_upload_timelapse": self.offline_stitch_and_upload_timelapse_api,
+            "process_timelapse_offline": self.process_timelapse_offline_api,
         }
         
         registered_service = await self.orchestrator_hypha_server_connection.register_service(service_api)
@@ -1496,9 +1496,9 @@ class OrchestrationSystem:
             return {"error": str(e), "success": False}
 
     @schema_function(skip_self=True)
-    async def offline_stitch_and_upload_timelapse_api(self, experiment_id: str, upload_immediately: bool = True, cleanup_temp_files: bool = True):
+    async def process_timelapse_offline_api(self, experiment_id: str, upload_immediately: bool = True, cleanup_temp_files: bool = True):
         """API wrapper for offline stitching and upload timelapse functionality."""
-        logger.info(f"API call: offline_stitch_and_upload_timelapse for experiment_id: {experiment_id}")
+        logger.info(f"API call: process_timelapse_offline for experiment_id: {experiment_id}")
         
         # Find matching tasks
         matching_tasks = [name for name in self.tasks.keys() if experiment_id in name]
@@ -1521,7 +1521,7 @@ class OrchestrationSystem:
                 raise Exception("No microscope services available for offline processing")
             
             # Call offline stitching function
-            result = await microscope_service.offline_stitch_and_upload_timelapse(
+            result = await microscope_service.process_timelapse_offline(
                 experiment_id=experiment_id,
                 upload_immediately=upload_immediately,
                 cleanup_temp_files=cleanup_temp_files
