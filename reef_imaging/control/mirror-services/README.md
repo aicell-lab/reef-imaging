@@ -93,8 +93,8 @@ screen -S incubator -dm python mirror_incubator.py
 
 ## Service IDs
 
-- Mirror Robotic Arm Service: `mirror-robotic-arm-control`
-- Mirror Incubator Service: `mirror-incubator-control`
+- Mirror Robotic Arm Service: `robotic-arm-control`
+- Mirror Incubator Service: `incubator-control`
 
 **Note**: Microscope mirror service ID is now managed by the `squid_control` package.
 
