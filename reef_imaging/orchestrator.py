@@ -952,19 +952,21 @@ class OrchestrationSystem:
                 logger.info(f"Starting scan with timeout of {scan_timeout_minutes} minutes")
                 
                 # Start scan using new unified API (one-shot call)
-                scan_result = await microscope_service.scan_start(
-                    saved_data_type="raw_images",
-                    well_plate_type=well_plate_type,
-                    illumination_settings=task_config["illumination_settings"],
-                    do_contrast_autofocus=task_config["do_contrast_autofocus"],
-                    do_reflection_af=task_config["do_reflection_af"],
-                    scanning_zone=task_config["imaging_zone"],
-                    Nx=task_config["Nx"],
-                    Ny=task_config["Ny"],
-                    dx=task_config["dx"],
-                    dy=task_config["dy"],
-                    action_ID=action_id,
-                )
+                # Build the config dictionary for the scan_start function
+                scan_config = {
+                    "saved_data_type": "raw_images",
+                    "well_plate_type": well_plate_type,
+                    "illumination_settings": task_config["illumination_settings"],
+                    "do_contrast_autofocus": task_config["do_contrast_autofocus"],
+                    "do_reflection_af": task_config["do_reflection_af"],
+                    "scanning_zone": task_config["imaging_zone"],
+                    "Nx": task_config["Nx"],
+                    "Ny": task_config["Ny"],
+                    "dx": task_config["dx"],
+                    "dy": task_config["dy"],
+                    "action_ID": action_id,
+                }
+                scan_result = await microscope_service.scan_start(config=scan_config)
                 logger.info(f"Scan initiated successfully: {scan_result}")
                 
                 # Poll scan status until completion or timeout
