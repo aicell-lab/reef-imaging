@@ -856,6 +856,10 @@ class OrchestrationSystem:
                 current_well = status_response.get("current_well", "N/A")
                 message = status_response.get("message", "")
                 
+                # Log full response for debugging when status is unknown
+                if status == "unknown":
+                    logger.debug(f"Full scan status response: {status_response}")
+                
                 # Log progress if it has changed
                 if progress != last_progress:
                     logger.info(f"Scan progress: {progress}% (well: {current_well}) - {message}")
@@ -875,6 +879,21 @@ class OrchestrationSystem:
                 elif status == "running":
                     # Continue polling
                     await asyncio.sleep(poll_interval)
+                
+                elif status == "idle":
+                    # Microscope service indicates it's idle (scan completed)
+                    logger.info("Scan completed - microscope service is idle")
+                    return
+                
+                elif status == "unknown":
+                    # Handle unknown status - could indicate completion
+                    # Check if progress is 100% or if there are other completion indicators
+                    if progress >= 100:
+                        logger.info(f"Scan completed with unknown status but 100% progress")
+                        return
+                    else:
+                        logger.warning(f"Unknown scan status: {status} (progress: {progress}%). Continuing to poll...")
+                        await asyncio.sleep(poll_interval)
                 
                 else:
                     logger.warning(f"Unknown scan status: {status}. Continuing to poll...")
