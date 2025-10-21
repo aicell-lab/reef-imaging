@@ -687,7 +687,8 @@ class OrchestrationSystem:
             # Start parallel operations
             await asyncio.gather(
                 self.incubator.get_sample_from_slot_to_transfer_station(incubator_slot),
-                target_microscope_service.home_stage()
+                target_microscope_service.home_stage(),
+                self.robotic_arm.transport_to_incubator()
             )
             # Move sample with robotic arm
             await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
