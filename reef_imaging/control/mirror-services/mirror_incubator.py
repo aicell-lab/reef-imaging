@@ -40,7 +40,7 @@ class MirrorIncubatorService:
         self.cloud_server_url = "https://hypha.aicell.io"
         self.cloud_workspace = "reef-imaging"
         self.cloud_token = os.environ.get("REEF_WORKSPACE_TOKEN")
-        self.cloud_service_id = "mirror-incubator-control"
+        self.cloud_service_id = "incubator-control"
         self.cloud_server = None
         self.cloud_service = None  # Add reference to registered cloud service
         
@@ -280,7 +280,7 @@ class MirrorIncubatorService:
                 "visibility": "protected",
                 "run_in_executor": True
             },
-            "type": "echo",
+            "type": "service",
         }
         
         # Add all mirrored methods to the service configuration
