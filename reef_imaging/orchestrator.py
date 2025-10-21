@@ -825,7 +825,6 @@ class OrchestrationSystem:
         poll_interval = 10  # seconds between status checks
         timeout_seconds = timeout_minutes * 60
         start_time = time.time()
-        last_progress = -1
         consecutive_failures = 0
         max_consecutive_failures = 3
         
@@ -851,19 +850,11 @@ class OrchestrationSystem:
                 consecutive_failures = 0
                 
                 # Extract status information
-                status = status_response.get("status", "unknown")
-                progress = status_response.get("progress", 0)
-                current_well = status_response.get("current_well", "N/A")
-                message = status_response.get("message", "")
+                status = status_response.get("state", "unknown")
                 
                 # Log full response for debugging when status is unknown
                 if status == "unknown":
                     logger.debug(f"Full scan status response: {status_response}")
-                
-                # Log progress if it has changed
-                if progress != last_progress:
-                    logger.info(f"Scan progress: {progress}% (well: {current_well}) - {message}")
-                    last_progress = progress
                 
                 # Check terminal states
                 if status == "completed":
@@ -886,14 +877,9 @@ class OrchestrationSystem:
                     return
                 
                 elif status == "unknown":
-                    # Handle unknown status - could indicate completion
-                    # Check if progress is 100% or if there are other completion indicators
-                    if progress >= 100:
-                        logger.info(f"Scan completed with unknown status but 100% progress")
-                        return
-                    else:
-                        logger.warning(f"Unknown scan status: {status} (progress: {progress}%). Continuing to poll...")
-                        await asyncio.sleep(poll_interval)
+                    # Handle unknown status
+                    logger.warning(f"Unknown scan status: {status}. Continuing to poll...")
+                    await asyncio.sleep(poll_interval)
                 
                 else:
                     logger.warning(f"Unknown scan status: {status}. Continuing to poll...")
