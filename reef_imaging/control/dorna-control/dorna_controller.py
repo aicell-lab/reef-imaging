@@ -50,9 +50,9 @@ class DornaController:
         self.set_motor(1)
         self.play_script("paths/transport_from_incubator_to_microscope1.txt")
     
-    def transport_from_microscope1_to_incubator(self):
+    def transport_to_incubator(self):
         self.set_motor(1)
-        self.play_script("paths/transport_from_microscope1_to_incubator.txt")
+        self.play_script("paths/transport_to_incubator.txt")
 
     def move_sample_from_incubator_to_microscope1(self):
         self.set_motor(1)
@@ -60,7 +60,7 @@ class DornaController:
 
     def move_plate(self, source, destination):
         if source == "microscope" and destination == "incubator":
-            self.move_sample_from_microscope1_to_incubator()
+            self.transport_to_incubator()
         elif source == "incubator" and destination == "microscope1":
             self.move_sample_from_incubator_to_microscope1()
         else:

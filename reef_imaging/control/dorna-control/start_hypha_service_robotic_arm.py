@@ -110,7 +110,7 @@ class RoboticArmService:
             "put_sample_on_microscope1": self.put_sample_on_microscope1,
             "put_sample_on_incubator": self.put_sample_on_incubator,
             "transport_from_incubator_to_microscope1": self.transport_from_incubator_to_microscope1,
-            "transport_from_microscope1_to_incubator": self.transport_from_microscope1_to_incubator,
+            "transport_to_incubator": self.transport_to_incubator,
             "connect": self.connect,
             "disconnect": self.disconnect,
             "halt": self.halt,
@@ -356,20 +356,20 @@ class RoboticArmService:
             raise e
 
     @schema_function(skip_self=True)
-    def transport_from_microscope1_to_incubator(self):
+    def transport_to_incubator(self):
         """
-        Transport a sample from microscope1 to the incubator
+        Transport a sample to the incubator (unified for all microscopes)
         Returns: bool
         """
         if not self.connected:
             self.connect()
         self.set_motor(1)
         try:
-            self.play_script("paths/transport_from_microscope1_to_incubator.txt")
-            logger.info("Sample moved from microscope1 to incubator")
+            self.play_script("paths/transport_to_incubator.txt")
+            logger.info("Sample moved to incubator")
             return True
         except Exception as e:
-            logger.error(f"Failed to transport sample from microscope1 to incubator: {e}")
+            logger.error(f"Failed to transport sample to incubator: {e}")
             raise e
     
     @schema_function(skip_self=True)
@@ -418,17 +418,17 @@ class RoboticArmService:
         try:
             if microscope_id == 1:
                 self.play_script("paths/grab_from_microscope1.txt")
-                self.play_script("paths/transport_from_microscope1_to_incubator.txt")
+                self.play_script("paths/transport_to_incubator.txt")
                 self.play_script("paths/put_on_incubator.txt")
                 logger.info(f"Sample moved from microscope 1 to incubator")
             elif microscope_id == 2:
                 self.play_script("paths/grab_from_microscope2.txt")
-                self.play_script("paths/transport_from_microscope2_to_incubator.txt")
+                self.play_script("paths/transport_to_incubator.txt")
                 self.play_script("paths/put_on_incubator.txt")
                 logger.info(f"Sample moved from microscope 2 to incubator")
             elif microscope_id == 3:  # squid+1 microscope
                 self.play_script("paths/grab_from_squid+1.txt")
-                self.play_script("paths/transport_from_squid+1_to_incubator.txt")
+                self.play_script("paths/transport_to_incubator.txt")
                 self.play_script("paths/put_on_incubator.txt")
                 logger.info(f"Sample moved from squid+1 microscope to incubator")
             else:
@@ -538,10 +538,10 @@ class RoboticArmService:
                 "description": "Transport a sample from the incubator to microscope 1",
                 "id": "transport_from_incubator_to_microscope1"
             },
-            "transport_from_microscope1_to_incubator.txt": {
-                "name": "Transport from Microscope 1 to Incubator",
-                "description": "Transport a sample from microscope 1 to the incubator",
-                "id": "transport_from_microscope1_to_incubator"
+            "transport_to_incubator.txt": {
+                "name": "Transport to Incubator",
+                "description": "Transport a sample to the incubator (unified for all microscopes)",
+                "id": "transport_to_incubator"
             },
             "incubator_to_microscope1.txt": {
                 "name": "Move from Incubator to Microscope 1",
@@ -615,13 +615,12 @@ class RoboticArmService:
             "put_on_microscope1": "paths/put_on_microscope1.txt",
             "grab_from_microscope1": "paths/grab_from_microscope1.txt",
             "transport_from_incubator_to_microscope1": "paths/transport_from_incubator_to_microscope1.txt",
-            "transport_from_microscope1_to_incubator": "paths/transport_from_microscope1_to_incubator.txt",
+            "transport_to_incubator": "paths/transport_to_incubator.txt",
             "incubator_to_microscope1": "paths/incubator_to_microscope1.txt",
             "microscope1_to_incubator": "paths/microscope1_to_incubator.txt",
             "put_on_squid+1": "paths/put_on_squid+1.txt",
             "grab_from_squid+1": "paths/grab_from_squid+1.txt",
             "transport_from_incubator_to_squid+1": "paths/transport_from_incubator_to_squid+1.txt",
-            "transport_from_squid+1_to_incubator": "paths/transport_from_squid+1_to_incubator.txt"
         }
         
         if action_id not in action_to_script:
