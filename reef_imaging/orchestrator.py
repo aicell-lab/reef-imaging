@@ -397,7 +397,7 @@ class OrchestrationSystem:
 
     async def check_service_health(self, service, service_type, service_identifier=None):
         """Check if the service is healthy with smart failure handling:
-        - During critical operations (robotic arm moving, scanning): Retry 3 times then EXIT program
+        - During critical operations (robotic arm moving, scanning): Retry 10 times then EXIT program
         - When idle: Refresh service proxy and continue
         Note: We keep the server connection stable and only refresh the service reference when idle."""
         log_service_name_part = service_identifier if service_identifier else (service.id if hasattr(service, "id") else service_type)
@@ -405,7 +405,7 @@ class OrchestrationSystem:
         
         logger.info(f"Health check loop started for {service_name}")
         consecutive_failures = 0
-        max_failures = 3
+        max_failures = 10
             
         while True:
             try:
