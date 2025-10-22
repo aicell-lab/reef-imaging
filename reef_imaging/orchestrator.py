@@ -159,7 +159,7 @@ class OrchestrationSystem:
                     "name": task_name,
                     "incubator_slot": settings["incubator_slot"],
                     "allocated_microscope": settings.get("allocated_microscope", "microscope-control-squid-1"),
-                    "imaging_zone": settings["imaging_zone"],
+                    "wells_to_scan": settings["wells_to_scan"],
                     "Nx": settings["Nx"],
                     "Ny": settings["Ny"],
                     "dx": settings.get("dx", 0.8),  # Default to 0.8 if not specified
@@ -231,7 +231,7 @@ class OrchestrationSystem:
                     existing_task_data["config"]["pending_datetimes"] != current_settings_config["pending_datetimes"] or
                     existing_task_data["config"]["imaged_datetimes"] != current_settings_config["imaged_datetimes"] or
                     any(existing_task_data["config"].get(k) != current_settings_config.get(k) 
-                        for k in ["incubator_slot", "allocated_microscope", "imaging_zone", "Nx", "Ny"])
+                        for k in ["incubator_slot", "allocated_microscope", "wells_to_scan", "Nx", "Ny"])
                 )
 
                 existing_task_data["config"] = current_settings_config # Always update config
@@ -317,7 +317,7 @@ class OrchestrationSystem:
                 # This prevents existing tasks from losing their allocated_microscope when new tasks are added
                 # Note: well_plate_type is now read from incubator service, not stored in config
                 critical_fields = [
-                    "incubator_slot", "allocated_microscope", "imaging_zone", "Nx", "Ny", 
+                    "incubator_slot", "allocated_microscope", "wells_to_scan", "Nx", "Ny", 
                     "illumination_settings", "do_contrast_autofocus", "do_reflection_af"
                 ]
                 for field in critical_fields:
@@ -965,7 +965,7 @@ class OrchestrationSystem:
                     "illumination_settings": task_config["illumination_settings"],
                     "do_contrast_autofocus": task_config["do_contrast_autofocus"],
                     "do_reflection_af": task_config["do_reflection_af"],
-                    "scanning_zone": task_config["imaging_zone"],
+                    "wells_to_scan": task_config["wells_to_scan"],
                     "Nx": task_config["Nx"],
                     "Ny": task_config["Ny"],
                     "dx": task_config["dx"],
@@ -1275,7 +1275,7 @@ class OrchestrationSystem:
         task_name = task_definition["name"]
         new_settings = task_definition["settings"]
 
-        required_settings = ["incubator_slot", "allocated_microscope", "pending_time_points", "imaging_zone", "Nx", "Ny", "illumination_settings", "do_contrast_autofocus", "do_reflection_af"]
+        required_settings = ["incubator_slot", "allocated_microscope", "pending_time_points", "wells_to_scan", "Nx", "Ny", "illumination_settings", "do_contrast_autofocus", "do_reflection_af"]
         for req_field in required_settings:
             if req_field not in new_settings:
                 msg = f"Missing required field '{req_field}' in settings for task '{task_name}'."
