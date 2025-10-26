@@ -158,7 +158,7 @@ class OrchestrationSystem:
                 parsed_settings_config = {
                     "name": task_name,
                     "incubator_slot": settings["incubator_slot"],
-                    "allocated_microscope": settings.get("allocated_microscope", "microscope-control-squid-1"),
+                    "allocated_microscope": settings.get("allocated_microscope", "microscope-squid-1"),
                     "wells_to_scan": settings["wells_to_scan"],
                     "Nx": settings["Nx"],
                     "Ny": settings["Ny"],
@@ -675,7 +675,7 @@ class OrchestrationSystem:
             # Determine the robot arm's target microscope ID (e.g., 1, 2, or 3)
             # Check for specific patterns first, then generic endings
             robot_microscope_target_id = 1 
-            if 'squid+1' in microscope_id_str or 'squid-plus-1' in microscope_id_str:
+            if 'squid+1' in microscope_id_str or 'squid-plus-3' in microscope_id_str:
                 robot_microscope_target_id = 3  # squid+1 microscope
             elif microscope_id_str.endswith('2'):
                 robot_microscope_target_id = 2
@@ -739,7 +739,7 @@ class OrchestrationSystem:
 
         # Determine the robot arm's target microscope ID first (needed for location check)
         robot_microscope_target_id = 1
-        if 'squid+1' in microscope_id_str or 'squid-plus-1' in microscope_id_str:
+        if 'squid+1' in microscope_id_str or 'squid-plus-3' in microscope_id_str:
             robot_microscope_target_id = 3  # squid+1 microscope
         elif microscope_id_str.endswith('2'):
             robot_microscope_target_id = 2

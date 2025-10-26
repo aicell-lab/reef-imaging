@@ -30,7 +30,7 @@ Create a `.env` file in the mirror-services directory with the following variabl
 ```env
 REEF_WORKSPACE_TOKEN=your_cloud_token_here
 REEF_LOCAL_TOKEN=your_local_token_here
-MICROSCOPE_SERVICE_ID=microscope-control-squid-1
+MICROSCOPE_SERVICE_ID=microscope-squid-1
 ```
 
 ## Running the Services
