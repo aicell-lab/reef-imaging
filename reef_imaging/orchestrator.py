@@ -79,6 +79,8 @@ class OrchestrationSystem:
 
         # Critical operation tracking - True when robotic arm is moving or microscope is scanning
         self.in_critical_operation = False
+        # Track exactly which services are in a critical section to avoid unrelated shutdowns
+        self.critical_services = set()  # set of tuples: (service_type, service_identifier)
 
         # Transport Queue and Worker Task
         self.transport_queue = asyncio.Queue()
@@ -430,8 +432,15 @@ class OrchestrationSystem:
                 else:
                     logger.warning(f"{service_name} service health check failed (failure {consecutive_failures}/{max_failures}): {e}")
                 
-                # Check if we're in a critical operation
-                if self.in_critical_operation:
+                # Check if this specific service is in a critical operation
+                is_critical_for_service = False
+                if service_identifier is not None:
+                    is_critical_for_service = (service_type, service_identifier) in self.critical_services
+                else:
+                    # Fallback: if no identifier, consider type-wide critical marking (rare)
+                    is_critical_for_service = (service_type, None) in self.critical_services
+
+                if is_critical_for_service:
                     logger.warning(f"{service_name} health check failed during CRITICAL OPERATION (robotic arm moving or scanning).")
                     
                     if consecutive_failures >= max_failures:
@@ -670,6 +679,13 @@ class OrchestrationSystem:
         # Mark as critical operation - robotic arm will be moving
         self.in_critical_operation = True
         logger.info("CRITICAL OPERATION START: Robotic arm loading sample")
+        # Mark related services as critical
+        try:
+            self.critical_services.add(('robotic_arm', self.robotic_arm_id))
+            self.critical_services.add(('microscope', microscope_id_str))
+            self.critical_services.add(('incubator', self.incubator_id))
+        except Exception:
+            pass
         
         try:
             # Determine the robot arm's target microscope ID (e.g., 1, 2, or 3)
@@ -711,6 +727,13 @@ class OrchestrationSystem:
             # Always reset critical operation flag
             self.in_critical_operation = False
             logger.info("CRITICAL OPERATION END: Robotic arm load complete")
+            # Unmark related services as critical
+            try:
+                self.critical_services.discard(('robotic_arm', self.robotic_arm_id))
+                self.critical_services.discard(('microscope', microscope_id_str))
+                self.critical_services.discard(('incubator', self.incubator_id))
+            except Exception:
+                pass
 
     async def unload_plate_from_microscope_api(self, incubator_slot: int, microscope_id: str): # MODIFIED: added microscope_id
         logger.info(f"API call: Queuing unload_plate_from_microscope for slot {incubator_slot} from microscope {microscope_id}")
@@ -774,6 +797,13 @@ class OrchestrationSystem:
         # Mark as critical operation - robotic arm will be moving
         self.in_critical_operation = True
         logger.info("CRITICAL OPERATION START: Robotic arm unloading sample")
+        # Mark related services as critical
+        try:
+            self.critical_services.add(('robotic_arm', self.robotic_arm_id))
+            self.critical_services.add(('microscope', microscope_id_str))
+            self.critical_services.add(('incubator', self.incubator_id))
+        except Exception:
+            pass
 
         try:
             # Home microscope stage
@@ -802,6 +832,13 @@ class OrchestrationSystem:
             # Always reset critical operation flag
             self.in_critical_operation = False
             logger.info("CRITICAL OPERATION END: Robotic arm unload complete")
+            # Unmark related services as critical
+            try:
+                self.critical_services.discard(('robotic_arm', self.robotic_arm_id))
+                self.critical_services.discard(('microscope', microscope_id_str))
+                self.critical_services.discard(('incubator', self.incubator_id))
+            except Exception:
+                pass
 
     async def _poll_scan_status(self, microscope_service, timeout_minutes=40):
         """
@@ -951,6 +988,11 @@ class OrchestrationSystem:
             # Mark as critical operation - microscope will be scanning
             self.in_critical_operation = True
             logger.info("CRITICAL OPERATION START: Microscope scanning well plate")
+            # Only the target microscope should be treated as critical during scan
+            try:
+                self.critical_services.add(('microscope', allocated_microscope_id))
+            except Exception:
+                pass
             
             try:
                 # Get scan timeout from task config (default 40 minutes)
@@ -985,6 +1027,11 @@ class OrchestrationSystem:
                 # Always reset critical operation flag after scanning
                 self.in_critical_operation = False
                 logger.info("CRITICAL OPERATION END: Microscope scan complete")
+                # Unmark microscope critical state
+                try:
+                    self.critical_services.discard(('microscope', allocated_microscope_id))
+                except Exception:
+                    pass
             
             await self._execute_unload_operation(incubator_slot=incubator_slot, microscope_id_str=allocated_microscope_id)
             
