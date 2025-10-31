@@ -660,23 +660,41 @@ class OrchestrationSystem:
                 
         logger.info("Disconnect process completed.")
 
-    async def load_plate_from_incubator_to_microscope_api(self, incubator_slot: int, microscope_id: str): # MODIFIED: added microscope_id
+    async def load_plate_from_incubator_to_microscope_api(self, incubator_slot: int, microscope_id: str):
+        """API endpoint to load a plate from incubator to microscope. Queues the operation and waits for completion."""
         logger.info(f"API call: Queuing load_plate_from_incubator_to_microscope for slot {incubator_slot} to microscope {microscope_id}")
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
             return {"success": False, "message": msg}
 
+        try:
+            await self._queue_transport_operation("load", incubator_slot, microscope_id)
+            return {"success": True, "message": f"Load task for slot {incubator_slot} to microscope {microscope_id} completed."}
+        except Exception as e:
+            logger.error(f"Load operation failed for slot {incubator_slot} to microscope {microscope_id}: {e}")
+            return {"success": False, "message": str(e)}
+
+    async def _queue_transport_operation(self, action: str, incubator_slot: int, microscope_id: str):
+        """Unified helper method to queue transport operations (load/unload) and wait for completion.
+        
+        Args:
+            action: Either "load" or "unload"
+            incubator_slot: The incubator slot number
+            microscope_id: The target microscope ID
+            
+        Returns:
+            None - the operation completes when the future is resolved by the transport worker
+        """
         op_future = asyncio.get_event_loop().create_future()
         await self.transport_queue.put({
-            "action": "load",
+            "action": action,
             "incubator_slot": incubator_slot,
-            "microscope_id": microscope_id, # Added microscope_id to queue item
+            "microscope_id": microscope_id,
             "future": op_future
         })
-        #wait for load to be completed
+        # Wait for the operation to be completed by the transport worker
         await op_future
-        return {"success": True, "message": f"Load task for slot {incubator_slot} to microscope {microscope_id} queued."}
 
     async def _execute_load_operation(self, incubator_slot, microscope_id_str): # MODIFIED: added microscope_id_str
         target_microscope_service = self.microscope_services.get(microscope_id_str)
@@ -750,23 +768,20 @@ class OrchestrationSystem:
             except Exception:
                 pass
 
-    async def unload_plate_from_microscope_api(self, incubator_slot: int, microscope_id: str): # MODIFIED: added microscope_id
+    async def unload_plate_from_microscope_api(self, incubator_slot: int, microscope_id: str):
+        """API endpoint to unload a plate from microscope to incubator. Queues the operation and waits for completion."""
         logger.info(f"API call: Queuing unload_plate_from_microscope for slot {incubator_slot} from microscope {microscope_id}")
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
             return {"success": False, "message": msg}
 
-        op_future = asyncio.get_event_loop().create_future()
-        await self.transport_queue.put({
-            "action": "unload",
-            "incubator_slot": incubator_slot,
-            "microscope_id": microscope_id, # Added microscope_id to queue item
-            "future": op_future
-        })
-        #wait for unload to be completed
-        await op_future
-        return {"success": True, "message": f"Unload task for slot {incubator_slot} from microscope {microscope_id} queued."}
+        try:
+            await self._queue_transport_operation("unload", incubator_slot, microscope_id)
+            return {"success": True, "message": f"Unload task for slot {incubator_slot} from microscope {microscope_id} completed."}
+        except Exception as e:
+            logger.error(f"Unload operation failed for slot {incubator_slot} from microscope {microscope_id}: {e}")
+            return {"success": False, "message": str(e)}
 
     async def _execute_unload_operation(self, incubator_slot, microscope_id_str): # MODIFIED: added microscope_id_str
         target_microscope_service = self.microscope_services.get(microscope_id_str)
@@ -989,8 +1004,8 @@ class OrchestrationSystem:
         self.sample_on_microscope_flags[allocated_microscope_id] = False 
 
         try:
-            # Pass allocated_microscope_id to transport operations
-            await self._execute_load_operation(incubator_slot=incubator_slot, microscope_id_str=allocated_microscope_id)
+            # Queue load operation - waits for transport queue to process
+            await self._queue_transport_operation("load", incubator_slot, allocated_microscope_id)
             
             # Get well plate type from incubator service (read-only from incubator)
             try:
@@ -1048,7 +1063,8 @@ class OrchestrationSystem:
                 except Exception:
                     pass
             
-            await self._execute_unload_operation(incubator_slot=incubator_slot, microscope_id_str=allocated_microscope_id)
+            # Queue unload operation - waits for transport queue to process
+            await self._queue_transport_operation("unload", incubator_slot, allocated_microscope_id)
             
             logger.info(f"Imaging cycle for task {task_name} on microscope {allocated_microscope_id} (action_id: {action_id}) completed successfully.")
             
@@ -1057,7 +1073,7 @@ class OrchestrationSystem:
             # Attempt cleanup - unload if possible from the specific microscope
             try:
                 logger.info(f"Attempting cleanup unload for task {task_name} from microscope {allocated_microscope_id} after cycle failure.")
-                await self._execute_unload_operation(incubator_slot=incubator_slot, microscope_id_str=allocated_microscope_id)
+                await self._queue_transport_operation("unload", incubator_slot, allocated_microscope_id)
                 logger.info(f"Cleanup unload completed for task {task_name} from {allocated_microscope_id} after cycle failure.")
             except Exception as cleanup_error:
                 logger.error(f"Cleanup unload also failed for task {task_name} from {allocated_microscope_id}: {cleanup_error}")
