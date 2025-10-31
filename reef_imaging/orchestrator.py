@@ -462,6 +462,21 @@ class OrchestrationSystem:
                     try:
                         await self._refresh_service_proxy(service_type, service_identifier)
                         logger.info(f"{service_name} service proxy refreshed successfully.")
+                        
+                        # CRITICAL FIX: Update the local service variable to point to the refreshed service object
+                        if service_type == 'incubator':
+                            service = self.incubator
+                        elif service_type == 'microscope' and service_identifier:
+                            service = self.microscope_services.get(service_identifier)
+                        elif service_type == 'robotic_arm':
+                            service = self.robotic_arm
+                        
+                        if service is None:
+                            logger.error(f"Failed to get refreshed {service_name} service reference. Will retry.")
+                            consecutive_failures += 1  # Don't reset counter if we can't get the service
+                            await asyncio.sleep(30)
+                            continue
+                        
                         consecutive_failures = 0  # Reset counter after successful refresh
                         
                     except Exception as refresh_error:
@@ -477,7 +492,7 @@ class OrchestrationSystem:
                         await asyncio.sleep(60)
                         continue
                     
-                    # Wait before checking health again after refresh
+                    # Wait before checking health again after refresh to give service time to stabilize
                     await asyncio.sleep(30)
                     continue
                 
