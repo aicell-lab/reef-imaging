@@ -63,7 +63,7 @@ Before starting, make sure you've installed Docker and docker-compose.
 
 2. Create an `.env` file based on the template in `.env-template`
 
-3. Configure your settings in `docker-compose.yaml`
+3. Configure your settings in `docker/docker-compose.yaml`
 
 4. Create the Docker network
    ```bash
@@ -72,7 +72,7 @@ Before starting, make sure you've installed Docker and docker-compose.
 
 5. Start the application containers
    ```bash
-   docker-compose up -d
+   cd docker && docker-compose up -d
    ```
 
 6. Start the traefik service
@@ -133,7 +133,7 @@ For more information about the `squid_control` package and its mirror features, 
 ## Restart Hypha
 
 ```
-docker-compose restart hypha
+cd docker && docker-compose restart hypha
 ```
 
 ## Documentation
