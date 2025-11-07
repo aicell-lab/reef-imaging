@@ -26,34 +26,48 @@ token = os.getenv("REEF_WORKSPACE_TOKEN")
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 #list all available cameras
-def count_available_cameras(max_tested=10):
+def count_available_cameras():
+    """Count cameras by checking /sys/class/video4linux devices"""
+    import glob
     count = 0
-    for i in range(max_tested):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            count += 1
-            cap.release()
+    video_devices = sorted(glob.glob('/sys/class/video4linux/video*'))
+    for device_path in video_devices:
+        try:
+            name_file = os.path.join(device_path, 'name')
+            if os.path.exists(name_file):
+                count += 1
+        except Exception:
+            pass
     return count
+
+def get_camera_by_name(name_pattern):
+    """Find camera device by name pattern (e.g., 'RealSense', 'HD USB Camera')"""
+    import glob
+    video_devices = sorted(glob.glob('/sys/class/video4linux/video*'))
+    for device_path in video_devices:
+        try:
+            name_file = os.path.join(device_path, 'name')
+            if os.path.exists(name_file):
+                with open(name_file, 'r') as f:
+                    device_name = f.read().strip()
+                    if name_pattern.lower() in device_name.lower():
+                        device_num = device_path.split('video')[-1]
+                        device_path = f"/dev/video{device_num}"
+                        logging.info(f"Found camera '{device_name}' at {device_path}")
+                        cam = cv2.VideoCapture(device_path)
+                        if cam.isOpened():
+                            cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                            return cam
+                        cam.release()
+        except Exception as e:
+            logging.warning(f"Error checking device {device_path}: {e}")
+    
+    raise RuntimeError(f"Could not find camera matching '{name_pattern}'")
 
 print("Number of available cameras:", count_available_cameras())
 
-def get_first_available_camera():
-    for i in range(10):  # Test first 10 indices
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            logging.info(f"Found available camera at index {i}")
-            return i
-        cap.release()
-    logging.error("No available cameras found")
-    return 0  # Fallback to 0 if no camera found
-
 def get_camera():
-    #camera_index = get_first_available_camera() # camera index is /dev/video4
-    camera_index = 4
-    cam = cv2.VideoCapture(camera_index)
-    # Force camera settings refresh
-    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    return cam
+    return get_camera_by_name("HD USB Camera")
 
 video_dir = '/media/reef/harddisk/lab_video'
 os.makedirs(video_dir, exist_ok=True)
@@ -62,16 +76,50 @@ recording_event = Event()
 recording_event.set()  # Automatically start recording
 frame_bytes = None
 
-camera = get_camera()  # Keep a single camera instance
+camera = None
+
+def get_camera_instance():
+    """Get or recreate camera instance with reconnection logic"""
+    global camera
+    if camera is None or not camera.isOpened():
+        try:
+            if camera is not None:
+                camera.release()
+            camera = get_camera()
+            logging.info("Camera reconnected successfully")
+        except Exception as e:
+            logging.error(f"Failed to get camera: {e}")
+            camera = None
+    return camera
 
 def capture_frames():
-    global frame_bytes
+    global frame_bytes, camera
+    consecutive_failures = 0
+    max_failures = 10
+    
     while recording_event.is_set():
-        success, frame = camera.read()
+        cam = get_camera_instance()
+        if cam is None:
+            time.sleep(1)
+            consecutive_failures += 1
+            if consecutive_failures >= max_failures:
+                logging.error("Too many camera failures, waiting before retry...")
+                time.sleep(5)
+                consecutive_failures = 0
+            continue
+        
+        success, frame = cam.read()
         if not success:
-            logging.error("Failed to capture image")
-            frame_bytes = None  # Clear frame_bytes on error
+            consecutive_failures += 1
+            logging.error(f"Failed to capture image (failure {consecutive_failures}/{max_failures})")
+            frame_bytes = None
+            if consecutive_failures >= max_failures:
+                logging.warning("Reconnecting camera due to repeated failures...")
+                camera = None
+                consecutive_failures = 0
+                time.sleep(2)
         else:
+            consecutive_failures = 0
             # Convert to grayscale (infrared cameras often work best in grayscale)
             gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 

@@ -66,8 +66,8 @@ class IncubatorService:
         self.local = local
         self.simulation = simulation
         self.server_url = "http://localhost:9527" if local else "https://hypha.aicell.io"
-        # Use provided port, environment variable, or default to /dev/ttyUSB2
-        port = serial_port or os.environ.get("CYPOMAT_SERIAL_PORT", "/dev/ttyUSB2")
+        # Use provided port, environment variable, or default to /dev/ttyUSB0
+        port = serial_port or os.environ.get("CYPOMAT_SERIAL_PORT", "/dev/ttyUSB0")
         logger.info(f"Using serial port: {port}")
         self.c = Cytomat(port, json_path="/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/docs/config.json") if not simulation else None
         self.samples_file = "/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/samples.json"

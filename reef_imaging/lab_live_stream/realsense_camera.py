@@ -12,6 +12,7 @@ from threading import Thread, Event
 from datetime import datetime, timedelta
 import asyncio
 from hypha_rpc import connect_to_server, login
+import pyrealsense2 as rs
 
 # Get the absolute path to the directory where the script is located
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -51,11 +52,13 @@ def get_first_available_camera():
     return 0  # Fallback to 0 if no camera found
 
 def get_camera():
-    # Use the specific device path for RealSense camera
-    cam = cv2.VideoCapture("/dev/video2")
-    # Force camera settings refresh
-    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    return cam
+    # Use pyrealsense2 pipeline for RealSense RGB camera
+    # Use RGB8 format (more compatible) and convert to BGR for OpenCV
+    pipeline = rs.pipeline()
+    config = rs.config()
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
+    pipeline.start(config)
+    return pipeline
 
 video_dir = '/media/reef/harddisk/dorna_video'
 os.makedirs(video_dir, exist_ok=True)
@@ -69,11 +72,22 @@ camera = get_camera()  # Keep a single camera instance
 def capture_frames():
     global frame_bytes
     while recording_event.is_set():
-        success, frame = camera.read()
-        if not success:
-            logging.error("Failed to capture image")
-            frame_bytes = None  # Clear frame_bytes on error
-        else:
+        try:
+            # Get frames from RealSense pipeline with longer timeout
+            frames = camera.wait_for_frames(timeout_ms=10000)
+            color_frame = frames.get_color_frame()
+            if not color_frame:
+                logging.error("Failed to capture image")
+                frame_bytes = None
+                time.sleep(0.1)
+                continue
+            
+            # Convert to numpy array (RGB8 format)
+            frame = np.asanyarray(color_frame.get_data())
+            
+            # Convert RGB to BGR for OpenCV
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            
             # Rotate 180 degrees for RealSense camera
             frame = cv2.rotate(frame, cv2.ROTATE_180)
 
@@ -89,6 +103,9 @@ def capture_frames():
                 frame_bytes = None  # Clear frame_bytes on error
             else:
                 frame_bytes = buffer.tobytes()
+        except Exception as e:
+            logging.error(f"Error capturing frame: {e}")
+            frame_bytes = None
         time.sleep(0.1)  # Reduce CPU load
 
 def gen_frames():
