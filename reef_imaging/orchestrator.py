@@ -85,6 +85,108 @@ class OrchestrationSystem:
         # Transport Queue and Worker Task
         self.transport_queue = asyncio.Queue()
         self._transport_worker_task = None # Will be created in _register_self_as_hypha_service
+        self._current_transport_operation = None  # Track current operation: {"action": str, "incubator_slot": int, "microscope_id": str}
+        
+        # Main event loop reference for creating futures from executor threads
+        self._main_event_loop = None
+
+    def _get_robot_microscope_id(self, microscope_id_str: str) -> int:
+        """Map microscope service ID to robot arm target ID (1, 2, or 3)."""
+        if 'squid+1' in microscope_id_str or 'squid-plus-3' in microscope_id_str:
+            return 3
+        elif microscope_id_str.endswith('2'):
+            return 2
+        elif microscope_id_str.endswith('1'):
+            return 1
+        else:
+            logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1.")
+            return 1
+
+    def _mark_critical_services(self, service_types: list):
+        """Mark services as being in a critical operation."""
+        for service_type, service_id in service_types:
+            try:
+                self.critical_services.add((service_type, service_id))
+            except Exception:
+                pass
+
+    def _unmark_critical_services(self, service_types: list):
+        """Unmark services from critical operation."""
+        for service_type, service_id in service_types:
+            try:
+                self.critical_services.discard((service_type, service_id))
+            except Exception:
+                pass
+
+    def _execute_in_main_loop(self, coro, timeout: float = 600):
+        """
+        Execute a coroutine in the main event loop, handling executor thread calls.
+        
+        This method ensures that async operations work correctly even when called
+        from executor threads (when run_in_executor=True in Hypha service config).
+        Returns the result of the coroutine.
+        """
+        if not self._main_event_loop:
+            logger.warning("Main event loop not stored, attempting to get current loop")
+            self._main_event_loop = asyncio.get_event_loop()
+        
+        main_loop = self._main_event_loop
+        
+        try:
+            current_loop = asyncio.get_running_loop()
+            if current_loop is main_loop:
+                # Already in main loop, but we can't await here (not async)
+                # This shouldn't happen, but if it does, schedule it
+                future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+                return future.result(timeout=timeout)
+            else:
+                # Different loop (executor thread), schedule in main loop
+                future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+                return future.result(timeout=timeout)
+        except RuntimeError:
+            # No running loop (executor thread)
+            if not main_loop:
+                raise RuntimeError("Main event loop not available and no current loop")
+            future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+            return future.result(timeout=timeout)
+
+    async def _queue_transport_operation(self, action: str, incubator_slot: int, microscope_id: str):
+        """Queue a transport operation and wait for completion."""
+        if not self._main_event_loop:
+            self._main_event_loop = asyncio.get_event_loop()
+        
+        main_loop = self._main_event_loop
+        op_future = main_loop.create_future()
+        
+        async def _queue_and_wait():
+            await self.transport_queue.put({
+                "action": action,
+                "incubator_slot": incubator_slot,
+                "microscope_id": microscope_id,
+                "future": op_future
+            })
+            await op_future
+        
+        try:
+            # Check if we're in the main loop or executor thread
+            try:
+                current_loop = asyncio.get_running_loop()
+                if current_loop is main_loop:
+                    # We're in the main loop, await directly
+                    await _queue_and_wait()
+                else:
+                    # Different loop, use run_coroutine_threadsafe
+                    future = asyncio.run_coroutine_threadsafe(_queue_and_wait(), main_loop)
+                    future.result(timeout=600)
+            except RuntimeError:
+                # No running loop (executor thread), use run_coroutine_threadsafe
+                future = asyncio.run_coroutine_threadsafe(_queue_and_wait(), main_loop)
+                future.result(timeout=600)
+        except Exception as e:
+            logger.error(f"Error in transport operation {action}: {e}", exc_info=True)
+            if not op_future.done():
+                op_future.cancel()
+            raise
 
     async def _start_health_check(self, service_type, service_instance, service_identifier=None): # MODIFIED signature
         key = (service_type, service_identifier) if service_identifier else service_type
@@ -660,30 +762,27 @@ class OrchestrationSystem:
                 
         logger.info("Disconnect process completed.")
 
-    async def load_plate_from_incubator_to_microscope_api(self, incubator_slot: int, microscope_id: str): # MODIFIED: added microscope_id
-        logger.info(f"API call: Queuing load_plate_from_incubator_to_microscope for slot {incubator_slot} to microscope {microscope_id}")
+    async def load_plate_from_incubator_to_microscope_api(self, incubator_slot: int, microscope_id: str):
+        """API endpoint to load a plate from incubator to microscope."""
+        logger.info(f"API call: load_plate_from_incubator_to_microscope for slot {incubator_slot} to microscope {microscope_id}")
+        
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
             return {"success": False, "message": msg}
 
-        op_future = asyncio.get_event_loop().create_future()
-        await self.transport_queue.put({
-            "action": "load",
-            "incubator_slot": incubator_slot,
-            "microscope_id": microscope_id, # Added microscope_id to queue item
-            "future": op_future
-        })
-        #wait for load to be completed
-        await op_future
-        return {"success": True, "message": f"Load task for slot {incubator_slot} to microscope {microscope_id} queued."}
+        try:
+            await self._queue_transport_operation("load", incubator_slot, microscope_id)
+            return {"success": True, "message": f"Load task for slot {incubator_slot} to microscope {microscope_id} completed."}
+        except Exception as e:
+            logger.error(f"Load operation failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
 
-    async def _execute_load_operation(self, incubator_slot, microscope_id_str): # MODIFIED: added microscope_id_str
+    async def _execute_load_operation(self, incubator_slot: int, microscope_id_str: str):
+        """Execute the load operation: move sample from incubator to microscope."""
         target_microscope_service = self.microscope_services.get(microscope_id_str)
         if not target_microscope_service:
-            error_msg = f"Failed to load: Microscope service {microscope_id_str} is not connected."
-            logger.error(error_msg)
-            raise Exception(error_msg)
+            raise Exception(f"Microscope service {microscope_id_str} is not connected.")
 
         if self.sample_on_microscope_flags.get(microscope_id_str, False):
             logger.info(f"Sample plate already on microscope {microscope_id_str}")
@@ -691,43 +790,35 @@ class OrchestrationSystem:
             
         logger.info(f"Loading sample from incubator slot {incubator_slot} to microscope {microscope_id_str}...")
         
-        # Mark as critical operation - robotic arm will be moving
+        # Mark critical operation
         self.in_critical_operation = True
         logger.info("CRITICAL OPERATION START: Robotic arm loading sample")
-        # Mark related services as critical
-        try:
-            self.critical_services.add(('robotic_arm', self.robotic_arm_id))
-            self.critical_services.add(('microscope', microscope_id_str))
-            self.critical_services.add(('incubator', self.incubator_id))
-        except Exception:
-            pass
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('microscope', microscope_id_str),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
         
         try:
-            # Determine the robot arm's target microscope ID (e.g., 1, 2, or 3)
-            # Check for specific patterns first, then generic endings
-            robot_microscope_target_id = 1 
-            if 'squid+1' in microscope_id_str or 'squid-plus-3' in microscope_id_str:
-                robot_microscope_target_id = 3  # squid+1 microscope
-            elif microscope_id_str.endswith('2'):
-                robot_microscope_target_id = 2
-            elif microscope_id_str.endswith('1'):
-                robot_microscope_target_id = 1
-            else:
-                logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1. This might be incorrect.")
+            robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
 
-            # Start parallel operations
+            # Start parallel operations: prepare incubator, home stage, move robot
             await asyncio.gather(
                 self.incubator.get_sample_from_slot_to_transfer_station(incubator_slot),
                 target_microscope_service.home_stage(),
                 self.robotic_arm.transport_to_incubator()
             )
+            
             # Move sample with robotic arm
             await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
-            await self.robotic_arm.incubator_to_microscope(robot_microscope_target_id) # Use derived robot_microscope_target_id
+            await self.robotic_arm.incubator_to_microscope(robot_microscope_target_id)
             
-            # Return microscope stage
-            await self.incubator.update_sample_location(incubator_slot, f"microscope{robot_microscope_target_id}") # Log with robot target ID
-            await target_microscope_service.return_stage()
+            # Return microscope stage and update location
+            await asyncio.gather(
+                self.incubator.update_sample_location(incubator_slot, f"microscope{robot_microscope_target_id}"),
+                target_microscope_service.return_stage()
+            )
             
             logger.info(f"Sample loaded onto microscope {microscope_id_str}.")
             self.sample_on_microscope_flags[microscope_id_str] = True
@@ -735,63 +826,42 @@ class OrchestrationSystem:
         except Exception as e:
             error_msg = f"Failed to load sample from slot {incubator_slot} to microscope {microscope_id_str}: {e}"
             logger.error(error_msg)
-            # Reset flag on failure if it was set prematurely or state is uncertain
             self.sample_on_microscope_flags[microscope_id_str] = False
             raise Exception(error_msg)
         finally:
-            # Always reset critical operation flag
             self.in_critical_operation = False
             logger.info("CRITICAL OPERATION END: Robotic arm load complete")
-            # Unmark related services as critical
-            try:
-                self.critical_services.discard(('robotic_arm', self.robotic_arm_id))
-                self.critical_services.discard(('microscope', microscope_id_str))
-                self.critical_services.discard(('incubator', self.incubator_id))
-            except Exception:
-                pass
+            self._unmark_critical_services(critical_services)
 
-    async def unload_plate_from_microscope_api(self, incubator_slot: int, microscope_id: str): # MODIFIED: added microscope_id
-        logger.info(f"API call: Queuing unload_plate_from_microscope for slot {incubator_slot} from microscope {microscope_id}")
+    async def unload_plate_from_microscope_api(self, incubator_slot: int, microscope_id: str):
+        """API endpoint to unload a plate from microscope to incubator."""
+        logger.info(f"API call: unload_plate_from_microscope for slot {incubator_slot} from microscope {microscope_id}")
+        
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
             return {"success": False, "message": msg}
 
-        op_future = asyncio.get_event_loop().create_future()
-        await self.transport_queue.put({
-            "action": "unload",
-            "incubator_slot": incubator_slot,
-            "microscope_id": microscope_id, # Added microscope_id to queue item
-            "future": op_future
-        })
-        #wait for unload to be completed
-        await op_future
-        return {"success": True, "message": f"Unload task for slot {incubator_slot} from microscope {microscope_id} queued."}
+        try:
+            await self._queue_transport_operation("unload", incubator_slot, microscope_id)
+            return {"success": True, "message": f"Unload task for slot {incubator_slot} from microscope {microscope_id} completed."}
+        except Exception as e:
+            logger.error(f"Unload operation failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
 
-    async def _execute_unload_operation(self, incubator_slot, microscope_id_str): # MODIFIED: added microscope_id_str
+    async def _execute_unload_operation(self, incubator_slot: int, microscope_id_str: str):
+        """Execute the unload operation: move sample from microscope to incubator."""
         target_microscope_service = self.microscope_services.get(microscope_id_str)
         if not target_microscope_service:
-            error_msg = f"Failed to unload: Microscope service {microscope_id_str} is not connected."
-            logger.error(error_msg)
-            raise Exception(error_msg)
+            raise Exception(f"Microscope service {microscope_id_str} is not connected.")
 
-        # Determine the robot arm's target microscope ID first (needed for location check)
-        robot_microscope_target_id = 1
-        if 'squid+1' in microscope_id_str or 'squid-plus-3' in microscope_id_str:
-            robot_microscope_target_id = 3  # squid+1 microscope
-        elif microscope_id_str.endswith('2'):
-            robot_microscope_target_id = 2
-        elif microscope_id_str.endswith('1'):
-            robot_microscope_target_id = 1
-        else:
-            logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1. This might be incorrect.")
+        robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
 
-        # Check actual sample location from incubator service to verify if sample is on microscope
+        # Verify sample location from incubator service
         try:
             actual_location = await self.incubator.get_sample_location(incubator_slot)
             logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
             
-            # Update flag based on actual location
             expected_microscope_location = f"microscope{robot_microscope_target_id}"
             if actual_location == expected_microscope_location:
                 self.sample_on_microscope_flags[microscope_id_str] = True
@@ -809,16 +879,15 @@ class OrchestrationSystem:
             
         logger.info(f"Unloading sample to incubator slot {incubator_slot} from microscope {microscope_id_str}...")
 
-        # Mark as critical operation - robotic arm will be moving
+        # Mark critical operation
         self.in_critical_operation = True
         logger.info("CRITICAL OPERATION START: Robotic arm unloading sample")
-        # Mark related services as critical
-        try:
-            self.critical_services.add(('robotic_arm', self.robotic_arm_id))
-            self.critical_services.add(('microscope', microscope_id_str))
-            self.critical_services.add(('incubator', self.incubator_id))
-        except Exception:
-            pass
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('microscope', microscope_id_str),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
 
         try:
             # Home microscope stage
@@ -826,7 +895,7 @@ class OrchestrationSystem:
             
             # Move sample with robotic arm
             await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
-            await self.robotic_arm.microscope_to_incubator(robot_microscope_target_id) # Use derived robot_microscope_target_id
+            await self.robotic_arm.microscope_to_incubator(robot_microscope_target_id)
             
             # Put sample back and return stage in parallel
             await asyncio.gather(
@@ -834,26 +903,18 @@ class OrchestrationSystem:
                 target_microscope_service.return_stage()
             )
             await self.incubator.update_sample_location(incubator_slot, "incubator_slot")
+            
             logger.info(f"Sample unloaded from microscope {microscope_id_str}.")
             self.sample_on_microscope_flags[microscope_id_str] = False
             
         except Exception as e:
             error_msg = f"Failed to unload sample to slot {incubator_slot} from microscope {microscope_id_str}: {e}"
             logger.error(error_msg)
-            # State of sample_on_microscope_flags[microscope_id_str] is uncertain on failure, could leave as True or try to verify.
-            # For now, we assume it might still be there if unload fails critically.
             raise Exception(error_msg)
         finally:
-            # Always reset critical operation flag
             self.in_critical_operation = False
             logger.info("CRITICAL OPERATION END: Robotic arm unload complete")
-            # Unmark related services as critical
-            try:
-                self.critical_services.discard(('robotic_arm', self.robotic_arm_id))
-                self.critical_services.discard(('microscope', microscope_id_str))
-                self.critical_services.discard(('incubator', self.incubator_id))
-            except Exception:
-                pass
+            self._unmark_critical_services(critical_services)
 
     async def _poll_scan_status(self, microscope_service, timeout_minutes=40):
         """
@@ -1203,6 +1264,13 @@ class OrchestrationSystem:
                 microscope_id_for_transport = task_details.get("microscope_id") # Get microscope_id
                 future_to_resolve = task_details.get("future")
 
+                # Track current operation
+                self._current_transport_operation = {
+                    "action": action,
+                    "incubator_slot": incubator_slot,
+                    "microscope_id": microscope_id_for_transport
+                }
+
                 logger.info(f"Transport worker picked up task: {action} for slot {incubator_slot} on microscope {microscope_id_for_transport}")
                 
                 if not microscope_id_for_transport:
@@ -1250,6 +1318,9 @@ class OrchestrationSystem:
                     logger.error(f"Transport worker failed for {action} on slot {incubator_slot}, microscope {microscope_id_for_transport}: {e}")
                     if future_to_resolve and not future_to_resolve.done():
                         future_to_resolve.set_exception(e)
+                finally:
+                    # Clear current operation tracking
+                    self._current_transport_operation = None
                 
                 self.transport_queue.task_done()
                 logger.info(f"Transport task {action} for slot {incubator_slot}, microscope {microscope_id_for_transport} completed")
@@ -1286,6 +1357,9 @@ class OrchestrationSystem:
             logger.error("REEF_WORKSPACE_TOKEN is not set in environment. Cannot register orchestrator service.")
             return
 
+        # Store the main event loop for use in executor threads
+        self._main_event_loop = asyncio.get_event_loop()
+        
         server_config_for_registration = {
             "server_url": self.orchestrator_hypha_server_url,
             "ping_interval": 30,
@@ -1513,7 +1587,7 @@ class OrchestrationSystem:
         """Returns the current status of the transport queue and worker."""
         logger.debug("Getting transport queue status")
         try:
-            # Get queue size
+            # Get queue size (items waiting, not including current operation)
             queue_size = self.transport_queue.qsize()
             
             # Check if transport worker is running
@@ -1536,26 +1610,32 @@ class OrchestrationSystem:
                 else: # Successfully completed its loop (should not happen for a continuous worker unless explicitly stopped)
                     worker_status = "completed_normally" 
             
+            # Get current operation if one is in progress
+            current_operation = None
+            if self._current_transport_operation:
+                current_operation = self._current_transport_operation.copy()
+            
             # Get sample on microscope flags for all configured microscopes
             sample_on_flags_per_microscope = {}
             for mic_id in self.configured_microscopes_info.keys():
                 sample_on_flags_per_microscope[mic_id] = self.sample_on_microscope_flags.get(mic_id, False)
 
             status_info = {
-                "queue_size": queue_size,
-                "worker_running": worker_running, # This is a more direct interpretation
-                "worker_detailed_status": worker_status, # More granular status
-                "sample_on_microscope_flags": sample_on_flags_per_microscope, # Changed to flags per microscope
-                "connected_microscopes": list(self.microscope_services.keys()), # List of connected microscope IDs
+                "queue_size": queue_size,  # Items waiting in queue
+                "current_operation": current_operation,  # Operation currently being executed (None if idle)
+                "worker_running": worker_running,
+                "worker_detailed_status": worker_status,
+                "sample_on_microscope_flags": sample_on_flags_per_microscope,
+                "connected_microscopes": list(self.microscope_services.keys()),
                 "active_task": self.active_task_name
             }
             
             # Add worker exception info if there was an error
-            if worker_status == "error" and self._transport_worker_task and self._transport_worker_task.done(): # Check done for safety
+            if worker_status == "error" and self._transport_worker_task and self._transport_worker_task.done():
                 try:
                     exception = self._transport_worker_task.exception()
                     status_info["worker_error"] = str(exception)
-                except Exception: # Broad catch if .exception() itself fails or returns non-stringable
+                except Exception:
                     status_info["worker_error"] = "Unknown error retrieving exception details"
             
             logger.debug(f"Transport queue status: {status_info}")
