@@ -307,11 +307,11 @@ class OrchestrationSystem:
             # Determine actual status based on current pending_datetimes
             current_actual_status = persisted_status
             if not current_settings_config["pending_datetimes"]:
-                # Only set to completed if not currently uploading
-                if persisted_status != "uploading":
+                # Only set to completed if not currently uploading or paused
+                if persisted_status not in ["uploading", "paused"]:
                     current_actual_status = "completed"
                 else:
-                    current_actual_status = "uploading"  # Keep uploading status
+                    current_actual_status = persisted_status  # Keep uploading or paused status
             elif persisted_status == "completed" and current_settings_config["pending_datetimes"]:
                  # If file said completed, but now there are pending points (e.g. user added them)
                  current_actual_status = "pending" # Reset to pending
@@ -346,7 +346,7 @@ class OrchestrationSystem:
                     logger.info(f"Task '{task_name}' status changing from '{existing_task_data['status']}' to '{current_actual_status}' due to config load/re-evaluation.")
                     existing_task_data["status"] = current_actual_status
 
-                if config_changed_significantly and existing_task_data["status"] not in ["pending", "completed"]:
+                if config_changed_significantly and existing_task_data["status"] not in ["pending", "completed", "paused"]:
                     if current_settings_config["pending_datetimes"]:
                         if existing_task_data["status"] != "pending":
                             logger.info(f"Task '{task_name}' had significant config changes while in status '{existing_task_data['status']}'. Resetting to pending as new points exist.")
@@ -358,9 +358,9 @@ class OrchestrationSystem:
                             existing_task_data["status"] = "completed"
             
             # Final status check: if a task somehow ends up with status != completed but no pending_datetimes, fix it.
-            # But respect 'uploading' status - don't force it to completed
+            # But respect 'uploading' and 'paused' status - don't force it to completed
             task_state_dict = self.tasks[task_name]
-            if not task_state_dict["config"]["pending_datetimes"] and task_state_dict["status"] not in ["completed", "uploading"]:
+            if not task_state_dict["config"]["pending_datetimes"] and task_state_dict["status"] not in ["completed", "uploading", "paused"]:
                 logger.warning(f"Task '{task_name}' has status '{task_state_dict['status']}' but no pending time points. Forcing to 'completed'.")
                 task_state_dict["status"] = "completed"
                 a_task_state_changed_for_write = True
@@ -1150,7 +1150,7 @@ class OrchestrationSystem:
                 status = task_data["status"]
                 pending_datetimes = internal_config.get("pending_datetimes", [])
 
-                if status in ["completed", "error", "uploading"]:
+                if status in ["completed", "error", "uploading", "paused"]:
                     continue
                 
                 if not pending_datetimes:
@@ -1241,7 +1241,7 @@ class OrchestrationSystem:
                 min_wait_time = ORCHESTRATOR_LOOP_SLEEP
                 next_potential_run_time = None
                 for task_data_val in self.tasks.values():
-                    if task_data_val["status"] not in ["completed", "error", "uploading"] and task_data_val["config"]["pending_datetimes"]:
+                    if task_data_val["status"] not in ["completed", "error", "uploading", "paused"] and task_data_val["config"]["pending_datetimes"]:
                         earliest_tp = task_data_val["config"]["pending_datetimes"][0]
                         if next_potential_run_time is None or earliest_tp < next_potential_run_time:
                             next_potential_run_time = earliest_tp
@@ -1380,6 +1380,8 @@ class OrchestrationSystem:
             "ping": self.ping,
             "add_imaging_task": self.add_imaging_task,
             "delete_imaging_task": self.delete_imaging_task,
+            "pause_imaging_task": self.pause_imaging_task,
+            "resume_imaging_task": self.resume_imaging_task,
             "get_all_imaging_tasks": self.get_all_imaging_tasks,
             "load_plate_from_incubator_to_microscope": self.load_plate_from_incubator_to_microscope_api,
             "unload_plate_from_microscope": self.unload_plate_from_microscope_api,
@@ -1562,6 +1564,27 @@ class OrchestrationSystem:
         
         await self._load_and_update_tasks() # Refresh orchestrator's internal task list
         return {"success": True, "message": f"Task '{task_name}' deleted successfully."}
+
+    @schema_function(skip_self=True)
+    async def pause_imaging_task(self, task_name: str):
+        """Pauses an imaging task, preventing it from being processed until resumed."""
+        if task_name not in self.tasks:
+            return {"success": False, "message": f"Task '{task_name}' not found."}
+        if self.tasks[task_name]["status"] == "paused":
+            return {"success": True, "message": f"Task '{task_name}' is already paused."}
+        await self._update_task_state_and_write_config(task_name, status="paused")
+        return {"success": True, "message": f"Task '{task_name}' paused."}
+
+    @schema_function(skip_self=True)
+    async def resume_imaging_task(self, task_name: str):
+        """Resumes a paused imaging task, allowing it to be processed again."""
+        if task_name not in self.tasks:
+            return {"success": False, "message": f"Task '{task_name}' not found."}
+        if self.tasks[task_name]["status"] != "paused":
+            return {"success": False, "message": f"Task '{task_name}' is not paused."}
+        new_status = "completed" if not self.tasks[task_name]["config"].get("pending_datetimes") else "pending"
+        await self._update_task_state_and_write_config(task_name, status=new_status)
+        return {"success": True, "message": f"Task '{task_name}' resumed."}
 
     @schema_function(skip_self=True)
     async def get_all_imaging_tasks(self):
