@@ -259,25 +259,39 @@ class OrchestrationSystem:
                 settings["imaging_completed"] = not has_pending
                 settings["imaging_started"] = has_imaged or (not has_pending and has_imaged) # Started if imaged, or completed & imaged
 
+                scan_mode = settings.get("scan_mode", "full_automation")
+                saved_data_type = settings.get("saved_data_type", "raw_images_well_plate")
+                
                 parsed_settings_config = {
                     "name": task_name,
-                    "incubator_slot": settings["incubator_slot"],
+                    "scan_mode": scan_mode,
+                    "saved_data_type": saved_data_type,
                     "allocated_microscope": settings.get("allocated_microscope", "microscope-squid-1"),
-                    "wells_to_scan": settings["wells_to_scan"],
-                    "Nx": settings["Nx"],
-                    "Ny": settings["Ny"],
-                    "dx": settings.get("dx", 0.8),  # Default to 0.8 if not specified
-                    "dy": settings.get("dy", 0.8),  # Default to 0.8 if not specified
-                    "scan_timeout_minutes": settings.get("scan_timeout_minutes", 40),  # Default to 40 minutes if not specified
+                    "scan_timeout_minutes": settings.get("scan_timeout_minutes", 40),
                     "illumination_settings": settings["illumination_settings"],
                     "do_contrast_autofocus": settings["do_contrast_autofocus"],
                     "do_reflection_af": settings["do_reflection_af"],
                     "pending_datetimes": pending_datetimes, 
                     "imaged_datetimes": imaged_datetimes,
-                    # The flags below are derived for internal logic if needed, but primary truth is pending/imaged_datetimes counts
                     "imaging_started_flag": settings["imaging_started"], 
                     "imaging_completed_flag": settings["imaging_completed"]
                 }
+                
+                if scan_mode == "full_automation":
+                    parsed_settings_config["incubator_slot"] = settings["incubator_slot"]
+                
+                if saved_data_type == "raw_images_well_plate":
+                    parsed_settings_config.update({
+                        "wells_to_scan": settings["wells_to_scan"],
+                        "Nx": settings["Nx"],
+                        "Ny": settings["Ny"],
+                        "dx": settings.get("dx", 0.8),
+                        "dy": settings.get("dy", 0.8),
+                        "well_plate_type": settings.get("well_plate_type", "96"),
+                    })
+                else:
+                    parsed_settings_config["positions"] = settings.get("positions", [])
+                
                 new_task_configs[task_name] = parsed_settings_config
             except KeyError as e:
                 logger.error(f"Missing key {e} in configuration settings for sample {task_name}. Skipping.")
@@ -418,10 +432,13 @@ class OrchestrationSystem:
                 current_internal_config = task_data_internal["config"]
 
                 # Ensure all critical fields from internal config are preserved
-                # This prevents existing tasks from losing their allocated_microscope when new tasks are added
-                # Note: well_plate_type is now read from incubator service, not stored in config
+                # Always write scan_mode and saved_data_type (with defaults if missing)
+                settings_to_write["scan_mode"] = current_internal_config.get("scan_mode", "full_automation")
+                settings_to_write["saved_data_type"] = current_internal_config.get("saved_data_type", "raw_images_well_plate")
+                
                 critical_fields = [
-                    "incubator_slot", "allocated_microscope", "wells_to_scan", "Nx", "Ny", 
+                    "incubator_slot", "allocated_microscope", 
+                    "wells_to_scan", "Nx", "Ny", "dx", "dy", "well_plate_type", "positions",
                     "illumination_settings", "do_contrast_autofocus", "do_reflection_af"
                 ]
                 for field in critical_fields:
@@ -1071,27 +1088,35 @@ class OrchestrationSystem:
                 pass
             
             try:
-                # Get scan timeout from task config (default 40 minutes)
                 scan_timeout_minutes = task_config.get("scan_timeout_minutes", 40)
-                logger.info(f"Starting scan with timeout of {scan_timeout_minutes} minutes")
+                saved_data_type = task_config.get("saved_data_type", "raw_images_well_plate")
                 
-                # Start scan using new unified API (one-shot call)
-                # Build the config dictionary for the scan_start function
+                logger.info(f"Building scan config for task {task_name}: saved_data_type={saved_data_type}")
+                
                 scan_config = {
-                    "saved_data_type": "raw_images",
-                    "well_plate_type": well_plate_type,
+                    "saved_data_type": saved_data_type,
                     "illumination_settings": task_config["illumination_settings"],
                     "do_contrast_autofocus": task_config["do_contrast_autofocus"],
                     "do_reflection_af": task_config["do_reflection_af"],
-                    "wells_to_scan": task_config["wells_to_scan"],
-                    "Nx": task_config["Nx"],
-                    "Ny": task_config["Ny"],
-                    "dx": task_config["dx"],
-                    "dy": task_config["dy"],
                     "action_ID": action_id,
                 }
+                
+                if saved_data_type == "raw_images_well_plate":
+                    scan_config.update({
+                        "well_plate_type": well_plate_type,
+                        "wells_to_scan": task_config["wells_to_scan"],
+                        "Nx": task_config["Nx"],
+                        "Ny": task_config["Ny"],
+                        "dx": task_config["dx"],
+                        "dy": task_config["dy"],
+                    })
+                    logger.info(f"Well plate scan config: wells={task_config['wells_to_scan']}, Nx={task_config['Nx']}, Ny={task_config['Ny']}")
+                else:
+                    scan_config["positions"] = task_config.get("positions", [])
+                    logger.info(f"Flexible scan config: {len(scan_config['positions'])} positions")
+                
+                logger.info(f"Sending scan_config to microscope: saved_data_type={scan_config['saved_data_type']}")
                 scan_result = await microscope_service.scan_start(config=scan_config)
-                logger.info(f"Scan initiated successfully: {scan_result}")
                 
                 # Poll scan status until completion or timeout
                 await self._poll_scan_status(
@@ -1124,6 +1149,43 @@ class OrchestrationSystem:
                 logger.error(f"Cleanup unload also failed for task {task_name} from {allocated_microscope_id}: {cleanup_error}")
             
             raise # Re-raise the original exception that caused the cycle failure
+
+    async def run_microscope_only_cycle(self, task_config, microscope_service, allocated_microscope_id):
+        """Run microscope-only scan without robotic arm/incubator. Supports raw_images_well_plate and raw_image_flexible."""
+        task_name = task_config["name"]
+        action_id = f"{task_name.replace(' ', '_')}"
+        saved_data_type = task_config.get("saved_data_type", "raw_images_well_plate")
+        
+        self.in_critical_operation = True
+        self.critical_services.add(('microscope', allocated_microscope_id))
+        
+        try:
+            scan_config = {
+                "saved_data_type": saved_data_type,
+                "illumination_settings": task_config["illumination_settings"],
+                "do_contrast_autofocus": task_config["do_contrast_autofocus"],
+                "do_reflection_af": task_config["do_reflection_af"],
+                "action_ID": action_id,
+            }
+            
+            if saved_data_type == "raw_images_well_plate":
+                scan_config.update({
+                    "well_plate_type": task_config.get("well_plate_type", "96"),
+                    "wells_to_scan": task_config["wells_to_scan"],
+                    "Nx": task_config["Nx"],
+                    "Ny": task_config["Ny"],
+                    "dx": task_config.get("dx", 0.8),
+                    "dy": task_config.get("dy", 0.8),
+                })
+            else:
+                scan_config["positions"] = task_config.get("positions", [])
+            
+            await microscope_service.scan_start(config=scan_config)
+            await self._poll_scan_status(microscope_service, task_config.get("scan_timeout_minutes", 40))
+            
+        finally:
+            self.in_critical_operation = False
+            self.critical_services.discard(('microscope', allocated_microscope_id))
 
     async def run_time_lapse(self):
         """Main orchestration loop to manage and run imaging tasks based on config.json."""
@@ -1187,37 +1249,35 @@ class OrchestrationSystem:
                     await asyncio.sleep(ORCHESTRATOR_LOOP_SLEEP) # Prevent rapid looping on misconfiguration
                     continue
 
-                logger.info(f"Preparing to run task {self.active_task_name} for time point {current_pending_tp_to_process.isoformat()} on microscope {allocated_microscope_id}. Current state: status='{task_data['status']}'")
-
-                # Ensure connections to shared services and the specific allocated microscope
+                scan_mode = task_config_for_cycle.get("scan_mode", "full_automation")
+                
                 try:
-                    # setup_connections now handles all configured microscopes.
-                    # We must ensure it has run recently enough or run it if the allocated one is missing.
-                    if not self.incubator or not self.robotic_arm or allocated_microscope_id not in self.microscope_services:
-                         logger.info(f"Essential services or allocated microscope {allocated_microscope_id} not ready. Running setup_connections.")
-                         await self.setup_connections() 
+                    if scan_mode == "full_automation":
+                        if not self.incubator or not self.robotic_arm or allocated_microscope_id not in self.microscope_services:
+                            await self.setup_connections()
+                    elif allocated_microscope_id not in self.microscope_services:
+                        await self.setup_connections()
                 except Exception as setup_error:
-                    logger.error(f"Failed to setup/verify connections for task {self.active_task_name} (microscope {allocated_microscope_id}): {setup_error}")
                     await self._update_task_state_and_write_config(self.active_task_name, status="error")
                     self.active_task_name = None
                     await asyncio.sleep(ORCHESTRATOR_LOOP_SLEEP)
-                    raise Exception(f"Failed to setup/verify connections for task {self.active_task_name} (microscope {allocated_microscope_id}): {setup_error}")
+                    raise Exception(f"Failed to setup connections: {setup_error}")
                 
-                # After setup_connections, check again for the specific microscope
                 target_microscope_service = self.microscope_services.get(allocated_microscope_id)
                 if not target_microscope_service:
-                    logger.error(f"Microscope {allocated_microscope_id} for task {self.active_task_name} is not available/connected even after setup_connections attempt.")
                     await self._update_task_state_and_write_config(self.active_task_name, status="error")
                     self.active_task_name = None
                     await asyncio.sleep(ORCHESTRATOR_LOOP_SLEEP)
-                    raise Exception(f"Microscope {allocated_microscope_id} for task {self.active_task_name} is not available/connected even after setup_connections attempt.")
+                    raise Exception(f"Microscope {allocated_microscope_id} not available")
 
-                logger.info(f"Starting cycle for task: {self.active_task_name} on microscope {allocated_microscope_id}, time point: {current_pending_tp_to_process.isoformat()}")
                 await self._update_task_state_and_write_config(self.active_task_name, status="active")
                 
                 try:
-                    # Pass the specific microscope service and its ID to run_cycle
-                    await self.run_cycle(task_config_for_cycle, target_microscope_service, allocated_microscope_id) 
+                    if scan_mode == "full_automation":
+                        await self.run_cycle(task_config_for_cycle, target_microscope_service, allocated_microscope_id)
+                    else:
+                        await self.run_microscope_only_cycle(task_config_for_cycle, target_microscope_service, allocated_microscope_id)
+                    
                     logger.info(f"Cycle for task {self.active_task_name} on {allocated_microscope_id}, time point {current_pending_tp_to_process.isoformat()} success.")
                     await self._update_task_state_and_write_config(
                         self.active_task_name,
@@ -1387,6 +1447,7 @@ class OrchestrationSystem:
             "unload_plate_from_microscope": self.unload_plate_from_microscope_api,
             "get_transport_queue_status": self.get_transport_queue_status,
             "process_timelapse_offline": self.process_timelapse_offline_api,
+            "scan_microscope_only": self.scan_microscope_only_api,
         }
         
         registered_service = await self.orchestrator_hypha_server_connection.register_service(service_api)
@@ -1403,63 +1464,77 @@ class OrchestrationSystem:
 
     @schema_function(skip_self=True)
     async def add_imaging_task(self, task_definition: dict):
-        """Adds a new imaging task to config.json or updates it if name exists."""
+        """Adds/updates imaging task. scan_mode: 'full_automation' (default) or 'microscope_only'. For microscope_only, saved_data_type: 'raw_images_well_plate' or 'raw_image_flexible'."""
         logger.info(f"Attempting to add/update imaging task: {task_definition.get('name')}")
         if not isinstance(task_definition, dict) or "name" not in task_definition or "settings" not in task_definition:
-            msg = "Invalid task definition: must be a dict with 'name' and 'settings'."
-            logger.error(msg)
-            return {"success": False, "message": msg}
+            raise ValueError("Invalid task definition: must be a dict with 'name' and 'settings'.")
 
         task_name = task_definition["name"]
         new_settings = task_definition["settings"]
 
-        required_settings = ["incubator_slot", "allocated_microscope", "pending_time_points", "wells_to_scan", "Nx", "Ny", "illumination_settings", "do_contrast_autofocus", "do_reflection_af"]
+        scan_mode = new_settings.get("scan_mode", "full_automation")
+        if scan_mode not in ["full_automation", "microscope_only"]:
+            raise ValueError(f"Invalid scan_mode '{scan_mode}'. Must be 'full_automation' or 'microscope_only'.")
+        
+        common_required = ["allocated_microscope", "pending_time_points", "illumination_settings", "do_contrast_autofocus", "do_reflection_af"]
+        
+        # Check if saved_data_type is provided (for both modes now)
+        saved_data_type = new_settings.get("saved_data_type")
+        if not saved_data_type:
+            raise ValueError(f"Missing required field 'saved_data_type' for task '{task_name}'. Must be 'raw_images_well_plate' or 'raw_image_flexible'.")
+        if saved_data_type not in ["raw_images_well_plate", "raw_image_flexible"]:
+            raise ValueError(f"Invalid saved_data_type '{saved_data_type}'. Must be 'raw_images_well_plate' or 'raw_image_flexible'.")
+        
+        if scan_mode == "full_automation":
+            required_settings = common_required + ["incubator_slot"]
+            if saved_data_type == "raw_images_well_plate":
+                required_settings.extend(["wells_to_scan", "Nx", "Ny"])
+            else:
+                required_settings.append("positions")
+        else:
+            required_settings = common_required + ["saved_data_type"]
+            if saved_data_type == "raw_images_well_plate":
+                required_settings.extend(["wells_to_scan", "Nx", "Ny"])
+            else:
+                required_settings.append("positions")
+        
         for req_field in required_settings:
             if req_field not in new_settings:
-                msg = f"Missing required field '{req_field}' in settings for task '{task_name}'."
-                logger.error(msg)
-                return {"success": False, "message": msg}
+                raise ValueError(f"Missing required field '{req_field}' for task '{task_name}' (scan_mode: {scan_mode}, saved_data_type: {saved_data_type}).")
         
         if not isinstance(new_settings["pending_time_points"], list):
-            msg = f"'pending_time_points' must be a list for task '{task_name}'."
-            logger.error(msg)
-            return {"success": False, "message": msg}
+            raise ValueError(f"'pending_time_points' must be a list for task '{task_name}'.")
 
-        parsed_pending_time_points_str = []
-        if not new_settings["pending_time_points"]:
-            logger.warning(f"Task '{task_name}' has an empty 'pending_time_points' list.")
-        
         for tp_str in new_settings["pending_time_points"]:
-            try:
-                datetime.fromisoformat(tp_str) # Validate naive ISO format
-                if 'Z' in tp_str or '+' in tp_str.split('T')[-1]: # Basic check for unwanted timezone indicators
-                    raise ValueError("Time point string should be naive local time.")
-                parsed_pending_time_points_str.append(tp_str)
-            except ValueError as ve:
-                msg = f"Invalid naive ISO format for a time point in 'pending_time_points' for task '{task_name}': {tp_str} ({ve})"
-                logger.error(msg)
-                return {"success": False, "message": msg}
-        
-        # Ensure "imaged_time_points" exists and is a list, defaulting to empty if not provided
-        if "imaged_time_points" not in new_settings:
-            new_settings["imaged_time_points"] = []
-        elif not isinstance(new_settings["imaged_time_points"], list):
-            msg = f"'imaged_time_points' must be a list if provided for task '{task_name}'."
-            logger.error(msg)
-            return {"success": False, "message": msg}
-        
-        for tp_str in new_settings["imaged_time_points"]: # Also validate imaged if provided
             try:
                 datetime.fromisoformat(tp_str)
                 if 'Z' in tp_str or '+' in tp_str.split('T')[-1]:
-                     raise ValueError("Time point string should be naive local time.")
+                    raise ValueError("Time point must be naive local time")
             except ValueError as ve:
-                msg = f"Invalid naive ISO format for a time point in 'imaged_time_points' for task '{task_name}': {tp_str} ({ve})"
-                logger.error(msg)
-                return {"success": False, "message": msg}
+                raise ValueError(f"Invalid time point '{tp_str}' for task '{task_name}': {ve}")
+        
+        if "imaged_time_points" not in new_settings:
+            new_settings["imaged_time_points"] = []
+        elif not isinstance(new_settings["imaged_time_points"], list):
+            raise ValueError(f"'imaged_time_points' must be a list for task '{task_name}'.")
+        
+        for tp_str in new_settings["imaged_time_points"]:
+            try:
+                datetime.fromisoformat(tp_str)
+                if 'Z' in tp_str or '+' in tp_str.split('T')[-1]:
+                    raise ValueError("Time point must be naive local time")
+            except ValueError as ve:
+                raise ValueError(f"Invalid imaged_time_point '{tp_str}' for task '{task_name}': {ve}")
+        
+        if saved_data_type == "raw_image_flexible":
+            positions = new_settings.get("positions", [])
+            if not isinstance(positions, list) or len(positions) == 0:
+                raise ValueError(f"'positions' must be a non-empty list for task '{task_name}'.")
+            for idx, pos in enumerate(positions):
+                if not isinstance(pos, dict) or "x" not in pos or "y" not in pos:
+                    raise ValueError(f"Position {idx} must be a dict with 'x' and 'y' for task '{task_name}'.")
 
-        # Determine status and flags based on the new/updated time points
-        has_pending = bool(parsed_pending_time_points_str)
+        has_pending = bool(new_settings["pending_time_points"])
         has_imaged = bool(new_settings.get("imaged_time_points", []))
 
         current_status = "pending"
@@ -1712,6 +1787,199 @@ class OrchestrationSystem:
             for task_name in matching_tasks:
                 await self._update_task_state_and_write_config(task_name, status="error")
             return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
+    async def scan_microscope_only_api(self, microscope_id: str, scan_config: dict, 
+                                       task_name: str = None, action_id: str = None, 
+                                       timeout_minutes: int = 40):
+        """
+        API endpoint to run a scan directly on a microscope without load/unload operations.
+        
+        This bypasses robotic arm and incubator integration, assuming the sample is already
+        manually placed on the microscope. Can optionally link to an existing task for status tracking.
+        
+        Args:
+            microscope_id: ID of the microscope to use (e.g., 'microscope-squid-1')
+            scan_config: Scan configuration dictionary containing:
+                - saved_data_type: 'raw_images_well_plate' or 'raw_image_flexible'
+                - For 'raw_images_well_plate':
+                    - wells_to_scan: List[str] (e.g., ['A1', 'B2'])
+                    - Nx, Ny: int (grid dimensions)
+                    - dx, dy: float (position intervals in mm)
+                    - well_plate_type: str (optional, default '96')
+                - For 'raw_image_flexible':
+                    - positions: List[dict] with x, y, z, Nx, Ny, Nz, dx, dy, dz, name
+                - illumination_settings: List[dict] (required for both)
+                - do_contrast_autofocus: bool (required for both)
+                - do_reflection_af: bool (required for both)
+            task_name: Optional task name to link for status tracking
+            action_id: Optional custom action ID (auto-generated if not provided)
+            timeout_minutes: Scan timeout in minutes (default 40)
+            
+        Returns:
+            Dictionary with success status, message, and scan details
+        """
+        logger.info(f"API call: scan_microscope_only for microscope {microscope_id}, task_name={task_name}")
+        
+        # Validate microscope_id
+        if microscope_id not in self.configured_microscopes_info:
+            msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
+            logger.error(msg)
+            return {"success": False, "message": msg}
+        
+        # Validate scan_config
+        if not isinstance(scan_config, dict):
+            msg = "scan_config must be a dictionary"
+            logger.error(msg)
+            return {"success": False, "message": msg}
+        
+        # Validate required fields
+        required_fields = ["saved_data_type", "illumination_settings", "do_contrast_autofocus", "do_reflection_af"]
+        for field in required_fields:
+            if field not in scan_config:
+                msg = f"Missing required field '{field}' in scan_config"
+                logger.error(msg)
+                return {"success": False, "message": msg}
+        
+        saved_data_type = scan_config["saved_data_type"]
+        if saved_data_type not in ["raw_images_well_plate", "raw_image_flexible"]:
+            msg = f"Invalid saved_data_type '{saved_data_type}'. Must be 'raw_images_well_plate' or 'raw_image_flexible'"
+            logger.error(msg)
+            return {"success": False, "message": msg}
+        
+        # Validate type-specific fields
+        if saved_data_type == "raw_images_well_plate":
+            required_raw_images_fields = ["wells_to_scan", "Nx", "Ny", "dx", "dy"]
+            for field in required_raw_images_fields:
+                if field not in scan_config:
+                    msg = f"Missing required field '{field}' for raw_images_well_plate scan type"
+                    logger.error(msg)
+                    return {"success": False, "message": msg}
+        elif saved_data_type == "raw_image_flexible":
+            if "positions" not in scan_config:
+                msg = "Missing required field 'positions' for raw_image_flexible scan type"
+                logger.error(msg)
+                return {"success": False, "message": msg}
+            if not isinstance(scan_config["positions"], list) or len(scan_config["positions"]) == 0:
+                msg = "'positions' must be a non-empty list for raw_image_flexible scan type"
+                logger.error(msg)
+                return {"success": False, "message": msg}
+        
+        # Ensure microscope service is connected
+        try:
+            if microscope_id not in self.microscope_services:
+                logger.info(f"Microscope {microscope_id} not connected. Attempting to setup connections...")
+                await self.setup_connections()
+            
+            microscope_service = self.microscope_services.get(microscope_id)
+            if not microscope_service:
+                raise Exception(f"Microscope service {microscope_id} is not available after connection attempt")
+        except Exception as e:
+            msg = f"Failed to connect to microscope {microscope_id}: {e}"
+            logger.error(msg)
+            return {"success": False, "message": msg}
+        
+        # Optional task linking - verify task exists and update status
+        if task_name:
+            if task_name not in self.tasks:
+                msg = f"Task '{task_name}' not found for linking"
+                logger.warning(msg)
+                # Don't fail, just warn - scan can proceed without task linking
+            else:
+                logger.info(f"Linking scan to task '{task_name}', updating status to 'active'")
+                await self._update_task_state_and_write_config(task_name, status="active")
+        
+        # Generate action_id if not provided
+        if not action_id:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            action_id = f"microscope_only_scan_{microscope_id}_{timestamp}"
+        
+        logger.info(f"Starting microscope-only scan with action_id: {action_id}")
+        
+        # Mark microscope as critical during scan
+        self.in_critical_operation = True
+        logger.info(f"CRITICAL OPERATION START: Microscope-only scan on {microscope_id}")
+        try:
+            self.critical_services.add(('microscope', microscope_id))
+        except Exception:
+            pass
+        
+        try:
+            # Build scan configuration based on saved_data_type
+            full_scan_config = {
+                "saved_data_type": saved_data_type,
+                "illumination_settings": scan_config["illumination_settings"],
+                "do_contrast_autofocus": scan_config["do_contrast_autofocus"],
+                "do_reflection_af": scan_config["do_reflection_af"],
+                "action_ID": action_id,
+            }
+            
+            if saved_data_type == "raw_images_well_plate":
+                # Add well plate type (default to '96' if not provided)
+                full_scan_config["well_plate_type"] = scan_config.get("well_plate_type", "96")
+                full_scan_config["wells_to_scan"] = scan_config["wells_to_scan"]
+                full_scan_config["Nx"] = scan_config["Nx"]
+                full_scan_config["Ny"] = scan_config["Ny"]
+                full_scan_config["dx"] = scan_config["dx"]
+                full_scan_config["dy"] = scan_config["dy"]
+            elif saved_data_type == "raw_image_flexible":
+                full_scan_config["positions"] = scan_config["positions"]
+            
+            logger.info(f"Initiating scan with config: {full_scan_config}")
+            
+            # Start the scan
+            scan_result = await microscope_service.scan_start(config=full_scan_config)
+            logger.info(f"Scan initiated successfully: {scan_result}")
+            
+            # Poll scan status until completion or timeout
+            await self._poll_scan_status(
+                microscope_service=microscope_service,
+                timeout_minutes=timeout_minutes
+            )
+            
+            logger.info(f"Microscope-only scan completed successfully for action_id: {action_id}")
+            
+            # Update linked task status if applicable
+            if task_name and task_name in self.tasks:
+                logger.info(f"Updating linked task '{task_name}' status to 'waiting_for_next_run'")
+                await self._update_task_state_and_write_config(task_name, status="waiting_for_next_run")
+            
+            return {
+                "success": True, 
+                "message": f"Microscope-only scan completed successfully on {microscope_id}",
+                "action_id": action_id,
+                "microscope_id": microscope_id,
+                "scan_type": saved_data_type
+            }
+            
+        except TimeoutError as e:
+            error_msg = f"Scan timed out after {timeout_minutes} minutes: {e}"
+            logger.error(error_msg)
+            
+            # Update linked task to error status
+            if task_name and task_name in self.tasks:
+                await self._update_task_state_and_write_config(task_name, status="error")
+            
+            return {"success": False, "message": error_msg, "action_id": action_id}
+            
+        except Exception as e:
+            error_msg = f"Microscope-only scan failed: {e}"
+            logger.error(error_msg, exc_info=True)
+            
+            # Update linked task to error status
+            if task_name and task_name in self.tasks:
+                await self._update_task_state_and_write_config(task_name, status="error")
+            
+            return {"success": False, "message": error_msg, "action_id": action_id}
+            
+        finally:
+            # Always reset critical operation flag after scanning
+            self.in_critical_operation = False
+            logger.info(f"CRITICAL OPERATION END: Microscope-only scan on {microscope_id}")
+            try:
+                self.critical_services.discard(('microscope', microscope_id))
+            except Exception:
+                pass
 
 async def main():
     # parser = argparse.ArgumentParser(description='Run the Orchestration System.')
