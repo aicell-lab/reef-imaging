@@ -267,7 +267,7 @@ class OrchestrationSystem:
                     "scan_mode": scan_mode,
                     "saved_data_type": saved_data_type,
                     "allocated_microscope": settings.get("allocated_microscope", "microscope-squid-1"),
-                    "scan_timeout_minutes": settings.get("scan_timeout_minutes", 40),
+                    "scan_timeout_minutes": settings.get("scan_timeout_minutes", 120),
                     "illumination_settings": settings["illumination_settings"],
                     "do_contrast_autofocus": settings["do_contrast_autofocus"],
                     "do_reflection_af": settings["do_reflection_af"],
@@ -933,7 +933,7 @@ class OrchestrationSystem:
             logger.info("CRITICAL OPERATION END: Robotic arm unload complete")
             self._unmark_critical_services(critical_services)
 
-    async def _poll_scan_status(self, microscope_service, timeout_minutes=40):
+    async def _poll_scan_status(self, microscope_service, timeout_minutes=120):
         """
         Poll the scan status from microscope service using scan_get_status().
         
@@ -941,15 +941,17 @@ class OrchestrationSystem:
         the scan progress. It handles WebSocket interruptions gracefully by retrying
         failed status checks.
         
+        CRITICAL: If scan times out, the program will exit immediately for safety.
+        
         Args:
             microscope_service: The microscope service proxy to poll
-            timeout_minutes: Maximum time in minutes to wait for scan completion (default: 40)
+            timeout_minutes: Maximum time in minutes to wait for scan completion (default: 120)
             
         Returns:
             None when scan completes successfully
             
         Raises:
-            TimeoutError: If scan doesn't complete within timeout_minutes
+            TimeoutError: If scan doesn't complete within timeout_minutes (PROGRAM WILL EXIT)
             Exception: If scan fails or encounters an error
         """
         poll_interval = 10  # seconds between status checks
@@ -963,11 +965,13 @@ class OrchestrationSystem:
         while True:
             elapsed_time = time.time() - start_time
             
-            # Check timeout
+            # Check timeout - CRITICAL ERROR: Exit program immediately
             if elapsed_time > timeout_seconds:
-                error_msg = f"Scan operation timed out after {timeout_minutes} minutes"
-                logger.error(error_msg)
-                raise TimeoutError(error_msg)
+                error_msg = f"CRITICAL: Scan operation timed out after {timeout_minutes} minutes ({timeout_minutes/60:.1f} hours)"
+                logger.critical(error_msg)
+                logger.critical("Scan timeout is a critical safety issue. Exiting program immediately.")
+                logger.critical("Monitoring system will alert and restart.")
+                sys.exit(1)  # Exit immediately - do not continue or attempt cleanup
             
             try:
                 # Poll status from microscope service
@@ -1088,7 +1092,7 @@ class OrchestrationSystem:
                 pass
             
             try:
-                scan_timeout_minutes = task_config.get("scan_timeout_minutes", 40)
+                scan_timeout_minutes = task_config.get("scan_timeout_minutes", 120)
                 saved_data_type = task_config.get("saved_data_type", "raw_images_well_plate")
                 
                 logger.info(f"Building scan config for task {task_name}: saved_data_type={saved_data_type}")
@@ -1116,9 +1120,11 @@ class OrchestrationSystem:
                     logger.info(f"Flexible scan config: {len(scan_config['positions'])} positions")
                 
                 logger.info(f"Sending scan_config to microscope: saved_data_type={scan_config['saved_data_type']}")
+                logger.info(f"Scan timeout set to: {scan_timeout_minutes} minutes ({scan_timeout_minutes/60:.1f} hours)")
                 scan_result = await microscope_service.scan_start(config=scan_config)
                 
                 # Poll scan status until completion or timeout
+                # CRITICAL: If timeout occurs, program will exit immediately
                 await self._poll_scan_status(
                     microscope_service=microscope_service,
                     timeout_minutes=scan_timeout_minutes
@@ -1140,15 +1146,11 @@ class OrchestrationSystem:
             
         except Exception as e:
             logger.error(f"Cycle failed for task {task_name} on microscope {allocated_microscope_id}: {e}")
-            # Attempt cleanup - unload if possible from the specific microscope
-            try:
-                logger.info(f"Attempting cleanup unload for task {task_name} from microscope {allocated_microscope_id} after cycle failure.")
-                await self._execute_unload_operation(incubator_slot=incubator_slot, microscope_id_str=allocated_microscope_id)
-                logger.info(f"Cleanup unload completed for task {task_name} from {allocated_microscope_id} after cycle failure.")
-            except Exception as cleanup_error:
-                logger.error(f"Cleanup unload also failed for task {task_name} from {allocated_microscope_id}: {cleanup_error}")
-            
-            raise # Re-raise the original exception that caused the cycle failure
+            logger.critical("CRITICAL: Cycle failed - NOT attempting automatic unload for safety reasons.")
+            logger.critical("Manual intervention required. Check microscope and sample status before proceeding.")
+            # DO NOT attempt cleanup unload - this is dangerous if scan is still running or timed out
+            # Manual intervention is required to safely assess the situation
+            raise # Re-raise the original exception
 
     async def run_microscope_only_cycle(self, task_config, microscope_service, allocated_microscope_id):
         """Run microscope-only scan without robotic arm/incubator. Supports raw_images_well_plate and raw_image_flexible."""
@@ -1181,7 +1183,7 @@ class OrchestrationSystem:
                 scan_config["positions"] = task_config.get("positions", [])
             
             await microscope_service.scan_start(config=scan_config)
-            await self._poll_scan_status(microscope_service, task_config.get("scan_timeout_minutes", 40))
+            await self._poll_scan_status(microscope_service, task_config.get("scan_timeout_minutes", 120))
             
         finally:
             self.in_critical_operation = False
@@ -1791,7 +1793,7 @@ class OrchestrationSystem:
     @schema_function(skip_self=True)
     async def scan_microscope_only_api(self, microscope_id: str, scan_config: dict, 
                                        task_name: str = None, action_id: str = None, 
-                                       timeout_minutes: int = 40):
+                                       timeout_minutes: int = 120):
         """
         API endpoint to run a scan directly on a microscope without load/unload operations.
         
@@ -1814,7 +1816,7 @@ class OrchestrationSystem:
                 - do_reflection_af: bool (required for both)
             task_name: Optional task name to link for status tracking
             action_id: Optional custom action ID (auto-generated if not provided)
-            timeout_minutes: Scan timeout in minutes (default 40)
+            timeout_minutes: Scan timeout in minutes (default 120)
             
         Returns:
             Dictionary with success status, message, and scan details
