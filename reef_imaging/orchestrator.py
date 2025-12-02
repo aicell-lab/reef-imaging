@@ -289,8 +289,14 @@ class OrchestrationSystem:
                         "dy": settings.get("dy", 0.8),
                         "well_plate_type": settings.get("well_plate_type", "96"),
                     })
+                    # Optional focus_map_points for raw_images_well_plate
+                    if "focus_map_points" in settings:
+                        parsed_settings_config["focus_map_points"] = settings["focus_map_points"]
                 else:
                     parsed_settings_config["positions"] = settings.get("positions", [])
+                    # Optional focus_map_points for raw_image_flexible
+                    if "focus_map_points" in settings:
+                        parsed_settings_config["focus_map_points"] = settings["focus_map_points"]
                 
                 new_task_configs[task_name] = parsed_settings_config
             except KeyError as e:
@@ -439,7 +445,8 @@ class OrchestrationSystem:
                 critical_fields = [
                     "incubator_slot", "allocated_microscope", 
                     "wells_to_scan", "Nx", "Ny", "dx", "dy", "well_plate_type", "positions",
-                    "illumination_settings", "do_contrast_autofocus", "do_reflection_af"
+                    "illumination_settings", "do_contrast_autofocus", "do_reflection_af",
+                    "focus_map_points"
                 ]
                 for field in critical_fields:
                     if field in current_internal_config:
@@ -1114,9 +1121,17 @@ class OrchestrationSystem:
                         "dx": task_config["dx"],
                         "dy": task_config["dy"],
                     })
+                    # Optional focus_map_points for raw_images_well_plate
+                    if "focus_map_points" in task_config:
+                        scan_config["focus_map_points"] = task_config["focus_map_points"]
+                        logger.info(f"Focus map enabled with {len(task_config['focus_map_points'])} reference points")
                     logger.info(f"Well plate scan config: wells={task_config['wells_to_scan']}, Nx={task_config['Nx']}, Ny={task_config['Ny']}")
                 else:
                     scan_config["positions"] = task_config.get("positions", [])
+                    # Optional focus_map_points for raw_image_flexible
+                    if "focus_map_points" in task_config:
+                        scan_config["focus_map_points"] = task_config["focus_map_points"]
+                        logger.info(f"Focus map enabled with {len(task_config['focus_map_points'])} reference points")
                     logger.info(f"Flexible scan config: {len(scan_config['positions'])} positions")
                 
                 logger.info(f"Sending scan_config to microscope: saved_data_type={scan_config['saved_data_type']}")
@@ -1179,8 +1194,14 @@ class OrchestrationSystem:
                     "dx": task_config.get("dx", 0.8),
                     "dy": task_config.get("dy", 0.8),
                 })
+                # Optional focus_map_points for raw_images_well_plate
+                if "focus_map_points" in task_config:
+                    scan_config["focus_map_points"] = task_config["focus_map_points"]
             else:
                 scan_config["positions"] = task_config.get("positions", [])
+                # Optional focus_map_points for raw_image_flexible
+                if "focus_map_points" in task_config:
+                    scan_config["focus_map_points"] = task_config["focus_map_points"]
             
             await microscope_service.scan_start(config=scan_config)
             await self._poll_scan_status(microscope_service, task_config.get("scan_timeout_minutes", 120))
@@ -1466,7 +1487,7 @@ class OrchestrationSystem:
 
     @schema_function(skip_self=True)
     async def add_imaging_task(self, task_definition: dict):
-        """Adds/updates imaging task. scan_mode: 'full_automation' (default) or 'microscope_only'. For microscope_only, saved_data_type: 'raw_images_well_plate' or 'raw_image_flexible'."""
+        """Adds/updates imaging task. scan_mode: 'full_automation' (default) or 'microscope_only'. For microscope_only, saved_data_type: 'raw_images_well_plate' or 'raw_image_flexible'. Optional focus_map_points: List[List[float]] with 3 reference points [[x,y,z], [x,y,z], [x,y,z]] in mm for focus interpolation."""
         logger.info(f"Attempting to add/update imaging task: {task_definition.get('name')}")
         if not isinstance(task_definition, dict) or "name" not in task_definition or "settings" not in task_definition:
             raise ValueError("Invalid task definition: must be a dict with 'name' and 'settings'.")
@@ -1535,6 +1556,24 @@ class OrchestrationSystem:
             for idx, pos in enumerate(positions):
                 if not isinstance(pos, dict) or "x" not in pos or "y" not in pos:
                     raise ValueError(f"Position {idx} must be a dict with 'x' and 'y' for task '{task_name}'.")
+
+        # Validate focus_map_points if provided (optional for both scan types)
+        if "focus_map_points" in new_settings:
+            focus_map_points = new_settings["focus_map_points"]
+            if not isinstance(focus_map_points, list):
+                raise ValueError(f"'focus_map_points' must be a list for task '{task_name}'.")
+            if len(focus_map_points) != 3:
+                raise ValueError(f"'focus_map_points' must contain exactly 3 reference points for task '{task_name}' (got {len(focus_map_points)}).")
+            for idx, point in enumerate(focus_map_points):
+                if not isinstance(point, list):
+                    raise ValueError(f"Focus map point {idx} must be a list [x, y, z] for task '{task_name}'.")
+                if len(point) != 3:
+                    raise ValueError(f"Focus map point {idx} must have exactly 3 coordinates [x, y, z] for task '{task_name}' (got {len(point)}).")
+                try:
+                    # Validate that all elements are numeric
+                    [float(coord) for coord in point]
+                except (ValueError, TypeError):
+                    raise ValueError(f"Focus map point {idx} must contain numeric coordinates [x, y, z] in mm for task '{task_name}'.")
 
         has_pending = bool(new_settings["pending_time_points"])
         has_imaged = bool(new_settings.get("imaged_time_points", []))
@@ -1809,8 +1848,10 @@ class OrchestrationSystem:
                     - Nx, Ny: int (grid dimensions)
                     - dx, dy: float (position intervals in mm)
                     - well_plate_type: str (optional, default '96')
+                    - focus_map_points: List[List[float]] (optional): 3 reference points [[x,y,z], [x,y,z], [x,y,z]] in mm for focus interpolation
                 - For 'raw_image_flexible':
                     - positions: List[dict] with x, y, z, Nx, Ny, Nz, dx, dy, dz, name
+                    - focus_map_points: List[List[float]] (optional): 3 reference points [[x,y,z], [x,y,z], [x,y,z]] in mm for focus interpolation
                 - illumination_settings: List[dict] (required for both)
                 - do_contrast_autofocus: bool (required for both)
                 - do_reflection_af: bool (required for both)
@@ -1866,6 +1907,34 @@ class OrchestrationSystem:
                 msg = "'positions' must be a non-empty list for raw_image_flexible scan type"
                 logger.error(msg)
                 return {"success": False, "message": msg}
+        
+        # Validate focus_map_points if provided (optional for both scan types)
+        if "focus_map_points" in scan_config:
+            focus_map_points = scan_config["focus_map_points"]
+            if not isinstance(focus_map_points, list):
+                msg = "'focus_map_points' must be a list"
+                logger.error(msg)
+                return {"success": False, "message": msg}
+            if len(focus_map_points) != 3:
+                msg = f"'focus_map_points' must contain exactly 3 reference points (got {len(focus_map_points)})"
+                logger.error(msg)
+                return {"success": False, "message": msg}
+            for idx, point in enumerate(focus_map_points):
+                if not isinstance(point, list):
+                    msg = f"Focus map point {idx} must be a list [x, y, z]"
+                    logger.error(msg)
+                    return {"success": False, "message": msg}
+                if len(point) != 3:
+                    msg = f"Focus map point {idx} must have exactly 3 coordinates [x, y, z] (got {len(point)})"
+                    logger.error(msg)
+                    return {"success": False, "message": msg}
+                try:
+                    # Validate that all elements are numeric
+                    [float(coord) for coord in point]
+                except (ValueError, TypeError):
+                    msg = f"Focus map point {idx} must contain numeric coordinates [x, y, z] in mm"
+                    logger.error(msg)
+                    return {"success": False, "message": msg}
         
         # Ensure microscope service is connected
         try:
@@ -1924,8 +1993,14 @@ class OrchestrationSystem:
                 full_scan_config["Ny"] = scan_config["Ny"]
                 full_scan_config["dx"] = scan_config["dx"]
                 full_scan_config["dy"] = scan_config["dy"]
+                # Optional focus_map_points for raw_images_well_plate
+                if "focus_map_points" in scan_config:
+                    full_scan_config["focus_map_points"] = scan_config["focus_map_points"]
             elif saved_data_type == "raw_image_flexible":
                 full_scan_config["positions"] = scan_config["positions"]
+                # Optional focus_map_points for raw_image_flexible
+                if "focus_map_points" in scan_config:
+                    full_scan_config["focus_map_points"] = scan_config["focus_map_points"]
             
             logger.info(f"Initiating scan with config: {full_scan_config}")
             
