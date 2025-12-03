@@ -297,6 +297,9 @@ class OrchestrationSystem:
                     # Optional focus_map_points for raw_image_flexible
                     if "focus_map_points" in settings:
                         parsed_settings_config["focus_map_points"] = settings["focus_map_points"]
+                    # Optional move_for_autofocus for raw_image_flexible
+                    if "move_for_autofocus" in settings:
+                        parsed_settings_config["move_for_autofocus"] = settings["move_for_autofocus"]
                 
                 new_task_configs[task_name] = parsed_settings_config
             except KeyError as e:
@@ -446,7 +449,7 @@ class OrchestrationSystem:
                     "incubator_slot", "allocated_microscope", 
                     "wells_to_scan", "Nx", "Ny", "dx", "dy", "well_plate_type", "positions",
                     "illumination_settings", "do_contrast_autofocus", "do_reflection_af",
-                    "focus_map_points"
+                    "focus_map_points", "move_for_autofocus"
                 ]
                 for field in critical_fields:
                     if field in current_internal_config:
@@ -1132,6 +1135,10 @@ class OrchestrationSystem:
                     if "focus_map_points" in task_config:
                         scan_config["focus_map_points"] = task_config["focus_map_points"]
                         logger.info(f"Focus map enabled with {len(task_config['focus_map_points'])} reference points")
+                    # Optional move_for_autofocus for raw_image_flexible
+                    if "move_for_autofocus" in task_config:
+                        scan_config["move_for_autofocus"] = task_config["move_for_autofocus"]
+                        logger.info(f"Move for autofocus enabled: {task_config['move_for_autofocus']}")
                     logger.info(f"Flexible scan config: {len(scan_config['positions'])} positions")
                 
                 logger.info(f"Sending scan_config to microscope: saved_data_type={scan_config['saved_data_type']}")
@@ -1202,6 +1209,9 @@ class OrchestrationSystem:
                 # Optional focus_map_points for raw_image_flexible
                 if "focus_map_points" in task_config:
                     scan_config["focus_map_points"] = task_config["focus_map_points"]
+                # Optional move_for_autofocus for raw_image_flexible
+                if "move_for_autofocus" in task_config:
+                    scan_config["move_for_autofocus"] = task_config["move_for_autofocus"]
             
             await microscope_service.scan_start(config=scan_config)
             await self._poll_scan_status(microscope_service, task_config.get("scan_timeout_minutes", 120))
@@ -1487,7 +1497,7 @@ class OrchestrationSystem:
 
     @schema_function(skip_self=True)
     async def add_imaging_task(self, task_definition: dict):
-        """Adds/updates imaging task. scan_mode: 'full_automation' (default) or 'microscope_only'. For microscope_only, saved_data_type: 'raw_images_well_plate' or 'raw_image_flexible'. Optional focus_map_points: List[List[float]] with 3 reference points [[x,y,z], [x,y,z], [x,y,z]] in mm for focus interpolation."""
+        """Adds/updates imaging task. scan_mode: 'full_automation' (default) or 'microscope_only'. For microscope_only, saved_data_type: 'raw_images_well_plate' or 'raw_image_flexible'. Optional focus_map_points: List[List[float]] with 3 reference points [[x,y,z], [x,y,z], [x,y,z]] in mm for focus interpolation. For raw_image_flexible, optional move_for_autofocus: bool to enable stage movement for autofocus."""
         logger.info(f"Attempting to add/update imaging task: {task_definition.get('name')}")
         if not isinstance(task_definition, dict) or "name" not in task_definition or "settings" not in task_definition:
             raise ValueError("Invalid task definition: must be a dict with 'name' and 'settings'.")
@@ -1556,6 +1566,11 @@ class OrchestrationSystem:
             for idx, pos in enumerate(positions):
                 if not isinstance(pos, dict) or "x" not in pos or "y" not in pos:
                     raise ValueError(f"Position {idx} must be a dict with 'x' and 'y' for task '{task_name}'.")
+            
+            # Validate move_for_autofocus if provided (optional for raw_image_flexible)
+            if "move_for_autofocus" in new_settings:
+                if not isinstance(new_settings["move_for_autofocus"], bool):
+                    raise ValueError(f"'move_for_autofocus' must be a boolean for task '{task_name}'.")
 
         # Validate focus_map_points if provided (optional for both scan types)
         if "focus_map_points" in new_settings:
@@ -1852,6 +1867,7 @@ class OrchestrationSystem:
                 - For 'raw_image_flexible':
                     - positions: List[dict] with x, y, z, Nx, Ny, Nz, dx, dy, dz, name
                     - focus_map_points: List[List[float]] (optional): 3 reference points [[x,y,z], [x,y,z], [x,y,z]] in mm for focus interpolation
+                    - move_for_autofocus: bool (optional): Whether to move stage for autofocus
                 - illumination_settings: List[dict] (required for both)
                 - do_contrast_autofocus: bool (required for both)
                 - do_reflection_af: bool (required for both)
@@ -1907,6 +1923,12 @@ class OrchestrationSystem:
                 msg = "'positions' must be a non-empty list for raw_image_flexible scan type"
                 logger.error(msg)
                 return {"success": False, "message": msg}
+            # Validate move_for_autofocus if provided (optional for raw_image_flexible)
+            if "move_for_autofocus" in scan_config:
+                if not isinstance(scan_config["move_for_autofocus"], bool):
+                    msg = "'move_for_autofocus' must be a boolean for raw_image_flexible scan type"
+                    logger.error(msg)
+                    return {"success": False, "message": msg}
         
         # Validate focus_map_points if provided (optional for both scan types)
         if "focus_map_points" in scan_config:
@@ -2001,6 +2023,9 @@ class OrchestrationSystem:
                 # Optional focus_map_points for raw_image_flexible
                 if "focus_map_points" in scan_config:
                     full_scan_config["focus_map_points"] = scan_config["focus_map_points"]
+                # Optional move_for_autofocus for raw_image_flexible
+                if "move_for_autofocus" in scan_config:
+                    full_scan_config["move_for_autofocus"] = scan_config["move_for_autofocus"]
             
             logger.info(f"Initiating scan with config: {full_scan_config}")
             
