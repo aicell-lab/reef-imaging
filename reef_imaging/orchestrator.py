@@ -268,7 +268,7 @@ class OrchestrationSystem:
                     "saved_data_type": saved_data_type,
                     "allocated_microscope": settings.get("allocated_microscope", "microscope-squid-1"),
                     "scan_timeout_minutes": settings.get("scan_timeout_minutes", 120),
-                    "illumination_settings": settings["illumination_settings"],
+                    "illumination_settings": copy.deepcopy(settings["illumination_settings"]),
                     "do_contrast_autofocus": settings["do_contrast_autofocus"],
                     "do_reflection_af": settings["do_reflection_af"],
                     "pending_datetimes": pending_datetimes, 
@@ -282,7 +282,7 @@ class OrchestrationSystem:
                 
                 if saved_data_type == "raw_images_well_plate":
                     parsed_settings_config.update({
-                        "wells_to_scan": settings["wells_to_scan"],
+                        "wells_to_scan": copy.deepcopy(settings["wells_to_scan"]),
                         "Nx": settings["Nx"],
                         "Ny": settings["Ny"],
                         "dx": settings.get("dx", 0.8),
@@ -291,12 +291,12 @@ class OrchestrationSystem:
                     })
                     # Optional focus_map_points for raw_images_well_plate
                     if "focus_map_points" in settings:
-                        parsed_settings_config["focus_map_points"] = settings["focus_map_points"]
+                        parsed_settings_config["focus_map_points"] = copy.deepcopy(settings["focus_map_points"])
                 else:
-                    parsed_settings_config["positions"] = settings.get("positions", [])
+                    parsed_settings_config["positions"] = copy.deepcopy(settings.get("positions", []))
                     # Optional focus_map_points for raw_image_flexible
                     if "focus_map_points" in settings:
-                        parsed_settings_config["focus_map_points"] = settings["focus_map_points"]
+                        parsed_settings_config["focus_map_points"] = copy.deepcopy(settings["focus_map_points"])
                     # Optional move_for_autofocus for raw_image_flexible
                     if "move_for_autofocus" in settings:
                         parsed_settings_config["move_for_autofocus"] = settings["move_for_autofocus"]
@@ -453,7 +453,7 @@ class OrchestrationSystem:
                 ]
                 for field in critical_fields:
                     if field in current_internal_config:
-                        settings_to_write[field] = current_internal_config[field]
+                        settings_to_write[field] = copy.deepcopy(current_internal_config[field])
 
                 settings_to_write["pending_time_points"] = sorted([
                     dt.strftime('%Y-%m-%dT%H:%M:%S') for dt in current_internal_config.get("pending_datetimes", [])
