@@ -4,11 +4,60 @@ A platform for automated microscope control, image acquisition, data management,
 
 ## Overview
 
-REEF Imaging provides a comprehensive system for automated microscopy workflows including:
-- Hardware control for microscopes, robotic arms, and incubators
-- Image acquisition and processing
-- Data management and storage through Hypha platform
-- Analysis tools for biological experiments
+REEF Imaging provides a comprehensive system for automated microscopy workflows, integrating hardware control, cloud-based data management, and real-time monitoring. The system enables fully automated time-lapse experiments with:
+
+- **Hardware Control**: Seamless integration with SQUID microscopes, Dorna robotic arms, and Cytomat incubators
+- **Image Acquisition**: Multi-channel fluorescence and brightfield imaging with automated well plate scanning
+- **Data Management**: Cloud-based storage and organization through the Hypha platform with artifact management
+- **Orchestration**: Task-driven workflow automation with real-time status tracking and error recovery
+- **Remote Operation**: Mirror service architecture enabling secure cloud-to-local hardware control
+- **Live Monitoring**: Real-time camera streaming and experiment status visualization
+- **Image Processing**: Utilities for image manipulation, stitching, and format conversion
+
+## Architecture
+
+### System Components
+
+The REEF Imaging system is built on a modular architecture with four main layers:
+
+1. **Orchestration Layer** (`orchestrator.py`)
+   - Task scheduling and management from `config.json`
+   - Hardware coordination (microscope, robotic arm, incubator)
+   - Transport queue for serialized sample handling
+   - Health monitoring with automatic reconnection
+   - Critical operation protection and error recovery
+
+2. **Hardware Control Layer** (`control/`)
+   - **Microscope Service**: Stage positioning, multi-channel imaging, autofocus
+   - **Robotic Arm Service**: Sample transport with preconfigured paths
+   - **Incubator Service**: Sample storage, environmental monitoring (temperature, CO2)
+   - All services expose standardized APIs through Hypha RPC
+
+3. **Mirror Service Layer** (`mirror-services/`)
+   - Cloud-to-local service proxies for remote operation
+   - Automatic method mirroring for robotic arm and incubator
+   - Health checks with auto-reconnection
+   - Note: Microscope has built-in mirror functionality
+
+4. **Data Management Layer** (`hypha_tools/`)
+   - Artifact management for cloud storage organization
+   - Automated uploaders for experiment data
+   - Gallery and dataset creation
+   - Concurrent batch uploads with resume capability
+
+### Communication Flow
+
+```
+Cloud (Hypha Server: hypha.aicell.io)
+    ↕️ (RPC)
+Mirror Services (robotic arm, incubator)
+    ↕️ (RPC)
+Local Hypha Server (reef.dyn.scilifelab.se:9527)
+    ↕️ (RPC)
+Orchestrator ← Hardware Services (microscope, robotic arm, incubator)
+    ↕️
+Physical Hardware
+```
 
 ## Lab Setup
 
@@ -91,24 +140,62 @@ python -m reef_imaging.hypha_service
 
 ### Running the Orchestrator
 
-To run the main orchestration system:
+**Production Mode** (with real hardware):
 ```bash
+cd reef_imaging
 python orchestrator.py
 ```
 
 For local development and testing:
 ```bash
+# Simulates hardware responses for safe testing
 python orchestrator_simulation.py --local
+```
+
+The orchestrator will:
+1. Connect to the Hypha server (local or cloud)
+2. Discover and connect to hardware services
+3. Load tasks from `config.json`
+4. Begin processing pending time points
+5. Monitor service health and automatically reconnect on failures
+
+### Starting Individual Hardware Services
+
+**Incubator Control**:
+```bash
+cd reef_imaging/control/cytomat-control
+python start_hypha_service_incubator.py --local
+```
+
+**Robotic Arm Control**:
+```bash
+cd reef_imaging/control/dorna-control
+python start_hypha_service_robotic_arm.py --local
+```
+
+**Microscope Control**:
+```bash
+cd squid-control  # External package
+python start_hypha_service_squid_control.py --local
+```
+
+**Mirror Services** (for cloud operation):
+```bash
+cd reef_imaging/control/mirror-services
+python mirror_incubator.py
+python mirror_robotic_arm.py
 ```
 
 ## Environment Setup
 
-The system requires environment variables for authentication:
+### Environment Variables
 
-```
-# For cloud operation
-REEF_WORKSPACE_TOKEN=your_token_here
-SQUID_WORKSPACE_TOKEN=your_token_here
+The system requires environment variables for authentication and configuration. Create a `.env` file in the project root:
+
+```bash
+# Cloud Operation (Hypha: hypha.aicell.io)
+REEF_WORKSPACE_TOKEN=your_cloud_token_here
+SQUID_WORKSPACE_TOKEN=your_squid_token_here
 
 # For local development
 REEF_LOCAL_TOKEN=your_local_token

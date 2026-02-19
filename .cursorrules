@@ -32,7 +32,6 @@ reef_imaging/
 ├── lab_live_stream/           # Camera streaming
 ├── tools/                     # Utility tools
 │   ├── image_processing/      # Image processing utilities
-│   └── micro_sam/            # ML segmentation tools
 ├── orchestrator.py            # Main orchestration system
 └── orchestrator_simulation.py # Testing/simulation mode
 ```
@@ -216,11 +215,10 @@ S3_SECRET_KEY=<secret>
 - Track **experiment progress** and completion rates
 - Alert on **critical failures** or anomalies
 
-## AI/ML Integration Rules
-- Use **micro-SAM** for image segmentation tasks
-- Implement **chatbot integration** for user assistance
-- Use **GPU acceleration** when available
-- Cache **model predictions** for repeated operations
+## AI Integration Rules
+- Implement **chatbot integration** for user assistance through Hypha platform
+- Use **GPU acceleration** when available for image processing tasks
+- Cache **processed results** for repeated operations to improve performance
 
 ## File and Code Organization
 - Keep **configuration files** in JSON format with validation
