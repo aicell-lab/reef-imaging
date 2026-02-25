@@ -20,9 +20,16 @@ templates = Jinja2Templates(directory=os.path.join(base_dir, "templates"))
 app.mount("/static", StaticFiles(directory=os.path.join(base_dir, "static")), name="static")
 
 import dotenv
-dotenv.load_dotenv()
+
+env_path = os.path.abspath(os.path.join(base_dir, "..", "..", ".env"))
+if os.path.exists(env_path):
+    dotenv.load_dotenv(env_path)
+else:
+    dotenv.load_dotenv()
 
 token = os.getenv("REEF_WORKSPACE_TOKEN")
+if not token:
+    logging.error("REEF_WORKSPACE_TOKEN is not set. Expected in %s or environment.", env_path)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
