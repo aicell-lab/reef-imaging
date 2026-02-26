@@ -10,8 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from threading import Thread, Event
 from datetime import datetime, timedelta
 import asyncio
-import urllib.request
-import urllib.error
+import httpx
 from hypha_rpc import connect_to_server
 
 # Get the absolute path to the directory where the script is located
@@ -232,24 +231,27 @@ async def watchdog_ping():
     timeout_s = int(os.getenv("REEF_HAMILTON_PING_TIMEOUT", "10"))
     max_failures = int(os.getenv("REEF_HAMILTON_PING_FAILURES", "3"))
     failures = 0
-    while True:
-        try:
-            with urllib.request.urlopen(url, timeout=timeout_s) as resp:
-                body = resp.read(32).decode("utf-8", errors="replace").strip()
-            if body.lower() == "pong":
-                failures = 0
-            else:
+    client_timeout = httpx.Timeout(timeout_s)
+    async with httpx.AsyncClient(timeout=client_timeout) as client:
+        while True:
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                body = resp.text.strip()[:32]
+                if body.lower() == "pong":
+                    failures = 0
+                else:
+                    failures += 1
+                    logging.error("Ping returned unexpected body: %s", body)
+            except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as exc:
                 failures += 1
-                logging.error("Ping returned unexpected body: %s", body)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
-            failures += 1
-            logging.error("Ping failed (%s/%s): %s", failures, max_failures, exc)
+                logging.error("Ping failed (%s/%s): %s", failures, max_failures, exc)
 
-        if failures >= max_failures:
-            logging.error("Ping failed %s times; exiting to trigger service restart.", failures)
-            os._exit(1)
+            if failures >= max_failures:
+                logging.error("Ping failed %s times; exiting to trigger service restart.", failures)
+                os._exit(1)
 
-        await asyncio.sleep(interval_s)
+            await asyncio.sleep(interval_s)
 
 if __name__ == "__main__":
     # Start the frame capture in a background thread
