@@ -17,7 +17,9 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 
 app = FastAPI()
 templates = Jinja2Templates(directory=os.path.join(base_dir, "templates"))
-app.mount("/static", StaticFiles(directory=os.path.join(base_dir, "static")), name="static")
+static_dir = os.path.join(base_dir, "static")
+os.makedirs(static_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 import dotenv
 
@@ -206,6 +208,9 @@ async def serve_fastapi(args, context=None):
     print(f'{context["user"]["id"]} - {scope["client"]} - {scope["method"]} - {scope["path"]}')
     await app(args["scope"], args["receive"], args["send"])
 
+async def ping(args, context=None):
+    return("pong")
+
 async def main():
     # Connect to Hypha server
     server = await connect_to_server({"server_url": "https://hypha.aicell.io", "workspace": "reef-imaging", "token": token})
@@ -215,6 +220,7 @@ async def main():
         "name": "reef-hamilton-feed",
         "type": "asgi",
         "serve": serve_fastapi,
+        "ping" : ping,
         "config": {"visibility": "public", "require_context": True}
     })
 
