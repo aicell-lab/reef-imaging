@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from threading import Thread, Event
 from datetime import datetime, timedelta
 import asyncio
+import urllib.request
+import urllib.error
 from hypha_rpc import connect_to_server
 
 # Get the absolute path to the directory where the script is located
@@ -17,9 +19,6 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 
 app = FastAPI()
 templates = Jinja2Templates(directory=os.path.join(base_dir, "templates"))
-static_dir = os.path.join(base_dir, "static")
-os.makedirs(static_dir, exist_ok=True)
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 import dotenv
 
@@ -208,7 +207,7 @@ async def serve_fastapi(args, context=None):
     print(f'{context["user"]["id"]} - {scope["client"]} - {scope["method"]} - {scope["path"]}')
     await app(args["scope"], args["receive"], args["send"])
 
-async def ping(args, context=None):
+async def ping(context=None):
     return("pong")
 
 async def main():
@@ -227,6 +226,31 @@ async def main():
     print(f"Access your app at:  {server.config.public_base_url}/{server.config.workspace}/apps/{svc_info['id'].split(':')[1]}")
     await server.serve()
 
+async def watchdog_ping():
+    url = os.getenv("REEF_HAMILTON_PING_URL", "https://hypha.aicell.io/reef-imaging/services/reef-hamilton-feed/ping")
+    interval_s = int(os.getenv("REEF_HAMILTON_PING_INTERVAL", "60"))
+    timeout_s = int(os.getenv("REEF_HAMILTON_PING_TIMEOUT", "10"))
+    max_failures = int(os.getenv("REEF_HAMILTON_PING_FAILURES", "3"))
+    failures = 0
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+                body = resp.read(32).decode("utf-8", errors="replace").strip()
+            if body.lower() == "pong":
+                failures = 0
+            else:
+                failures += 1
+                logging.error("Ping returned unexpected body: %s", body)
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+            failures += 1
+            logging.error("Ping failed (%s/%s): %s", failures, max_failures, exc)
+
+        if failures >= max_failures:
+            logging.error("Ping failed %s times; exiting to trigger service restart.", failures)
+            os._exit(1)
+
+        await asyncio.sleep(interval_s)
+
 if __name__ == "__main__":
     # Start the frame capture in a background thread
     capture_thread = Thread(target=capture_frames, daemon=True)
@@ -239,4 +263,5 @@ if __name__ == "__main__":
     # Use the same pattern as other Hypha services
     loop = asyncio.get_event_loop()
     loop.create_task(main())
+    loop.create_task(watchdog_ping())
     loop.run_forever()
