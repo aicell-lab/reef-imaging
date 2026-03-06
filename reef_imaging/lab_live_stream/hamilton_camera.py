@@ -10,7 +10,6 @@ from fastapi.staticfiles import StaticFiles
 from threading import Thread, Event
 from datetime import datetime, timedelta
 import asyncio
-import httpx
 from hypha_rpc import connect_to_server
 
 # Get the absolute path to the directory where the script is located
@@ -225,33 +224,6 @@ async def main():
     print(f"Access your app at:  {server.config.public_base_url}/{server.config.workspace}/apps/{svc_info['id'].split(':')[1]}")
     await server.serve()
 
-async def watchdog_ping():
-    url = os.getenv("REEF_HAMILTON_PING_URL", "https://hypha.aicell.io/reef-imaging/services/reef-hamilton-feed/ping")
-    interval_s = int(os.getenv("REEF_HAMILTON_PING_INTERVAL", "60"))
-    timeout_s = int(os.getenv("REEF_HAMILTON_PING_TIMEOUT", "10"))
-    max_failures = int(os.getenv("REEF_HAMILTON_PING_FAILURES", "3"))
-    failures = 0
-    client_timeout = httpx.Timeout(timeout_s)
-    async with httpx.AsyncClient(timeout=client_timeout) as client:
-        while True:
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                body = resp.text.strip()[:32]
-                if body.lower() == "pong":
-                    failures = 0
-                else:
-                    failures += 1
-                    logging.error("Ping returned unexpected body: %s", body)
-            except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as exc:
-                failures += 1
-                logging.error("Ping failed (%s/%s): %s", failures, max_failures, exc)
-
-            if failures >= max_failures:
-                logging.error("Ping failed %s times; exiting to trigger service restart.", failures)
-                os._exit(1)
-
-            await asyncio.sleep(interval_s)
 
 if __name__ == "__main__":
     # Start the frame capture in a background thread
@@ -265,5 +237,4 @@ if __name__ == "__main__":
     # Use the same pattern as other Hypha services
     loop = asyncio.get_event_loop()
     loop.create_task(main())
-    loop.create_task(watchdog_ping())
     loop.run_forever()
