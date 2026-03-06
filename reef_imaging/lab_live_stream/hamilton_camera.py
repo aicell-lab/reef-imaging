@@ -30,6 +30,8 @@ token = os.getenv("REEF_WORKSPACE_TOKEN")
 if not token:
     logging.error("REEF_WORKSPACE_TOKEN is not set. Expected in %s or environment.", env_path)
 
+hypha_connected = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
@@ -180,6 +182,14 @@ def clean_old_videos():
                 os.remove(filepath)
                 logging.info("Deleted old video: %s", filename)
 
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok" if hypha_connected else "error",
+        "hypha_connected": hypha_connected,
+        "camera_ok": frame_bytes is not None,
+    }
+
 @app.get("/home")
 def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -209,6 +219,7 @@ async def ping(context=None):
     return("pong")
 
 async def main():
+    global hypha_connected
     # Connect to Hypha server
     server = await connect_to_server({"server_url": "https://hypha.aicell.io", "workspace": "reef-imaging", "token": token})
 
@@ -221,8 +232,12 @@ async def main():
         "config": {"visibility": "public", "require_context": True}
     })
 
+    hypha_connected = True
     print(f"Access your app at:  {server.config.public_base_url}/{server.config.workspace}/apps/{svc_info['id'].split(':')[1]}")
-    await server.serve()
+    try:
+        await server.serve()
+    finally:
+        hypha_connected = False
 
 
 if __name__ == "__main__":

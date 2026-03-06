@@ -21,7 +21,7 @@ Service name: `reef-hamilton-camera`
 
 Install command (run as Administrator):
 ```powershell
-& "C:\Program Files\nssm\nssm.exe" install reef-hamilton-camera "C:\Miniconda3\envs\reef-imaging\python.exe" "reef_imaging\lab_live_stream\hamilton_camera.py"
+& "C:\Program Files\nssm\nssm.exe" install reef-hamilton-camera "C:\Users\Hamilton\Miniconda3\envs\reef-imaging\python.exe" "reef_imaging\lab_live_stream\hamilton_camera.py"
 & "C:\Program Files\nssm\nssm.exe" set reef-hamilton-camera AppDirectory "C:\Users\Hamilton\workspace\reef-imaging"
 & "C:\Program Files\nssm\nssm.exe" set reef-hamilton-camera Start SERVICE_AUTO_START
 ```
@@ -39,4 +39,25 @@ sc stop reef-hamilton-camera
 Check status:
 ```bat
 sc query reef-hamilton-camera
+```
+
+### Watchdog Service (NSSM)
+
+`watchdog.py` polls `https://hypha.aicell.io/reef-imaging/apps/reef-hamilton-feed/health` every 60 seconds and restarts `reef-hamilton-camera` if the health check fails (connection lost, non-ok status, or timeout).
+
+**Must be installed and run as Administrator** so it has permission to stop/start the camera service.
+
+Service name: `reef-hamilton-watchdog`
+
+Install command (run as Administrator):
+```powershell
+& "C:\Program Files\nssm\nssm.exe" install reef-hamilton-watchdog "C:\Users\Hamilton\Miniconda3\envs\reef-imaging\python.exe" "reef_imaging\lab_live_stream\watchdog.py"
+& "C:\Program Files\nssm\nssm.exe" set reef-hamilton-watchdog AppDirectory "C:\Users\Hamilton\workspace\reef-imaging"
+& "C:\Program Files\nssm\nssm.exe" set reef-hamilton-watchdog Start SERVICE_AUTO_START
+& "C:\Program Files\nssm\nssm.exe" set reef-hamilton-watchdog ObjectName LocalSystem
+```
+
+Start the watchdog:
+```bat
+sc start reef-hamilton-watchdog
 ```
