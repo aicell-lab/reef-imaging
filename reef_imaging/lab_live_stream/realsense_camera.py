@@ -29,36 +29,84 @@ token = os.getenv("REEF_WORKSPACE_TOKEN")
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-# List all available cameras
-def count_available_cameras(max_tested=10):
-    count = 0
-    for i in range(max_tested):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            count += 1
-            cap.release()
-    return count
+def list_realsense_devices():
+    devices = rs.context().query_devices()
+    info = []
+    for device in devices:
+        name = device.get_info(rs.camera_info.name)
+        serial = device.get_info(rs.camera_info.serial_number)
+        info.append((name, serial))
+    return info
 
-print("Number of available cameras:", count_available_cameras())
+def start_realsense_pipeline():
+    devices = list_realsense_devices()
+    if not devices:
+        raise RuntimeError("No RealSense device detected")
 
-def get_first_available_camera():
-    for i in range(10):  # Test first 10 indices
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            logging.info(f"Found available camera at index {i}")
-            return i
-        cap.release()
-    logging.error("No available cameras found")
-    return 0  # Fallback to 0 if no camera found
+    logging.info(
+        "Detected RealSense devices: %s",
+        ", ".join([f"{name} ({serial})" for name, serial in devices]),
+    )
 
-def get_camera():
-    # Use pyrealsense2 pipeline for RealSense RGB camera
-    # Use RGB8 format (more compatible) and convert to BGR for OpenCV
-    pipeline = rs.pipeline()
-    config = rs.config()
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
-    pipeline.start(config)
-    return pipeline
+    # Always pick the first connected RealSense device automatically.
+    selected_name, selected_serial = devices[0]
+    logging.info("Using RealSense device: %s (%s)", selected_name, selected_serial)
+
+    # Try common color profiles in order of preference.
+    # Keep combinations valid for D4xx family to avoid "Couldn't resolve requests".
+    candidate_profiles = [
+        ("default", rs.format.bgr8, 30),
+        (640, 480, rs.format.bgr8, 30),
+        (640, 480, rs.format.rgb8, 30),
+        (848, 480, rs.format.bgr8, 10),
+        (1280, 720, rs.format.bgr8, 15),
+    ]
+
+    for profile in candidate_profiles:
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_device(selected_serial)
+        if profile[0] == "default":
+            _, color_format, fps = profile
+            config.enable_stream(rs.stream.color, color_format, fps)
+            profile_desc = f"default {color_format} @ {fps}fps"
+        else:
+            width, height, color_format, fps = profile
+            config.enable_stream(rs.stream.color, width, height, color_format, fps)
+            profile_desc = f"{width}x{height} {color_format} @ {fps}fps"
+        try:
+            pipeline.start(config)
+            # Validate that frames are actually flowing; startup can succeed while stream stalls.
+            # Do not fail on the first timeout because some devices need a short settle period.
+            got_frame = False
+            warmup_attempts = 6
+            for _ in range(warmup_attempts):
+                try:
+                    frames = pipeline.wait_for_frames(timeout_ms=3000)
+                    if frames.get_color_frame():
+                        got_frame = True
+                        break
+                except RuntimeError:
+                    continue
+            if not got_frame:
+                raise RuntimeError("Stream started but no color frame received during warm-up")
+            logging.info(
+                "RealSense stream started: %s",
+                profile_desc,
+            )
+            return pipeline, color_format
+        except RuntimeError as exc:
+            try:
+                pipeline.stop()
+            except Exception:
+                pass
+            logging.warning(
+                "Failed to start profile %s: %s",
+                profile_desc,
+                exc,
+            )
+
+    raise RuntimeError("Unable to start RealSense color stream with supported profiles")
 
 video_dir = '/media/reef/harddisk/dorna_video'
 os.makedirs(video_dir, exist_ok=True)
@@ -67,27 +115,53 @@ recording_event = Event()
 recording_event.set()  # Automatically start recording
 frame_bytes = None
 
-camera = get_camera()  # Keep a single camera instance
+camera = None
+camera_color_format = None
+
+def stop_camera():
+    global camera, camera_color_format
+    if camera is not None:
+        try:
+            camera.stop()
+        except Exception:
+            pass
+    camera = None
+    camera_color_format = None
+
+def get_camera_instance():
+    global camera, camera_color_format
+    if camera is None:
+        try:
+            camera, camera_color_format = start_realsense_pipeline()
+            logging.info("RealSense camera connected")
+        except Exception as exc:
+            logging.error(f"Failed to initialize RealSense camera: {exc}")
+            camera = None
+            camera_color_format = None
+    return camera
 
 def capture_frames():
-    global frame_bytes
+    global frame_bytes, camera_color_format
+    consecutive_failures = 0
+    max_failures = 12
     while recording_event.is_set():
+        cam = get_camera_instance()
+        if cam is None:
+            frame_bytes = None
+            time.sleep(1.0)
+            continue
+
         try:
-            # Get frames from RealSense pipeline with longer timeout
-            frames = camera.wait_for_frames(timeout_ms=10000)
+            frames = cam.wait_for_frames(timeout_ms=5000)
             color_frame = frames.get_color_frame()
             if not color_frame:
-                logging.error("Failed to capture image")
-                frame_bytes = None
-                time.sleep(0.1)
-                continue
-            
-            # Convert to numpy array (RGB8 format)
+                raise RuntimeError("No color frame returned by RealSense pipeline")
+
             frame = np.asanyarray(color_frame.get_data())
-            
-            # Convert RGB to BGR for OpenCV
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            
+
+            if camera_color_format == rs.format.rgb8:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
             # Rotate 180 degrees for RealSense camera
             frame = cv2.rotate(frame, cv2.ROTATE_180)
 
@@ -103,9 +177,16 @@ def capture_frames():
                 frame_bytes = None  # Clear frame_bytes on error
             else:
                 frame_bytes = buffer.tobytes()
+                consecutive_failures = 0
         except Exception as e:
-            logging.error(f"Error capturing frame: {e}")
+            consecutive_failures += 1
+            logging.error(f"Error capturing frame ({consecutive_failures}/{max_failures}): {e}")
             frame_bytes = None
+            if consecutive_failures >= max_failures:
+                logging.warning("Restarting RealSense pipeline after repeated capture failures")
+                stop_camera()
+                consecutive_failures = 0
+                time.sleep(2.0)
         time.sleep(0.1)  # Reduce CPU load
 
 def gen_frames():
