@@ -56,7 +56,7 @@ def restart_service():
         else:
             logging.info("sc %s %s succeeded", action, SERVICE_NAME)
         if action == "stop":
-            time.sleep(5)  # give the service time to stop before starting
+            time.sleep(10)  # wait for Hypha server to deregister the old service
 
 
 def main():
