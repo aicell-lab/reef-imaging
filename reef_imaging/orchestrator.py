@@ -1470,6 +1470,7 @@ class OrchestrationSystem:
             "get_transport_queue_status": self.get_transport_queue_status,
             "process_timelapse_offline": self.process_timelapse_offline_api,
             "scan_microscope_only": self.scan_microscope_only_api,
+            "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
         }
         
         registered_service = await self.orchestrator_hypha_server_connection.register_service(service_api)
@@ -1787,6 +1788,17 @@ class OrchestrationSystem:
         except Exception as e:
             logger.error(f"Failed to get transport queue status: {e}", exc_info=True)
             return {"error": str(e), "success": False}
+
+    @schema_function(skip_self=True)
+    async def get_lab_video_stream_urls(self):
+        """Returns public Hypha URLs for all lab video stream services (lab cameras, Hamilton, RealSense)."""
+        base = f"{self.orchestrator_hypha_server_url}/{self.workspace}/apps"
+        return {
+            "reef-lab-camera-1": f"{base}/reef-lab-camera-1",
+            "reef-lab-camera-2": f"{base}/reef-lab-camera-2",
+            "reef-hamilton-feed": f"{base}/reef-hamilton-feed",
+            "reef-realsense-feed": f"{base}/reef-realsense-feed",
+        }
 
     @schema_function(skip_self=True)
     async def process_timelapse_offline_api(self, experiment_id: str, upload_immediately: bool = True, cleanup_temp_files: bool = True):
