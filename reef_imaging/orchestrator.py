@@ -86,9 +86,6 @@ class OrchestrationSystem:
         self.transport_queue = asyncio.Queue()
         self._transport_worker_task = None # Will be created in _register_self_as_hypha_service
         self._current_transport_operation = None  # Track current operation: {"action": str, "incubator_slot": int, "microscope_id": str}
-        
-        # Main event loop reference for creating futures from executor threads
-        self._main_event_loop = None
 
     def _get_robot_microscope_id(self, microscope_id_str: str) -> int:
         """Map microscope service ID to robot arm target ID (1, 2, or 3)."""
@@ -118,47 +115,11 @@ class OrchestrationSystem:
             except Exception:
                 pass
 
-    def _execute_in_main_loop(self, coro, timeout: float = 600):
-        """
-        Execute a coroutine in the main event loop, handling executor thread calls.
-        
-        This method ensures that async operations work correctly even when called
-        from executor threads (when run_in_executor=True in Hypha service config).
-        Returns the result of the coroutine.
-        """
-        if not self._main_event_loop:
-            logger.warning("Main event loop not stored, attempting to get current loop")
-            self._main_event_loop = asyncio.get_event_loop()
-        
-        main_loop = self._main_event_loop
-        
-        try:
-            current_loop = asyncio.get_running_loop()
-            if current_loop is main_loop:
-                # Already in main loop, but we can't await here (not async)
-                # This shouldn't happen, but if it does, schedule it
-                future = asyncio.run_coroutine_threadsafe(coro, main_loop)
-                return future.result(timeout=timeout)
-            else:
-                # Different loop (executor thread), schedule in main loop
-                future = asyncio.run_coroutine_threadsafe(coro, main_loop)
-                return future.result(timeout=timeout)
-        except RuntimeError:
-            # No running loop (executor thread)
-            if not main_loop:
-                raise RuntimeError("Main event loop not available and no current loop")
-            future = asyncio.run_coroutine_threadsafe(coro, main_loop)
-            return future.result(timeout=timeout)
-
     async def _queue_transport_operation(self, action: str, incubator_slot: int, microscope_id: str):
         """Queue a transport operation and wait for completion."""
-        if not self._main_event_loop:
-            self._main_event_loop = asyncio.get_event_loop()
-        
-        main_loop = self._main_event_loop
-        op_future = main_loop.create_future()
-        
-        async def _queue_and_wait():
+        loop = asyncio.get_running_loop()
+        op_future = loop.create_future()
+        try:
             await self.transport_queue.put({
                 "action": action,
                 "incubator_slot": incubator_slot,
@@ -166,22 +127,6 @@ class OrchestrationSystem:
                 "future": op_future
             })
             await op_future
-        
-        try:
-            # Check if we're in the main loop or executor thread
-            try:
-                current_loop = asyncio.get_running_loop()
-                if current_loop is main_loop:
-                    # We're in the main loop, await directly
-                    await _queue_and_wait()
-                else:
-                    # Different loop, use run_coroutine_threadsafe
-                    future = asyncio.run_coroutine_threadsafe(_queue_and_wait(), main_loop)
-                    future.result(timeout=600)
-            except RuntimeError:
-                # No running loop (executor thread), use run_coroutine_threadsafe
-                future = asyncio.run_coroutine_threadsafe(_queue_and_wait(), main_loop)
-                future.result(timeout=600)
         except Exception as e:
             logger.error(f"Error in transport operation {action}: {e}", exc_info=True)
             if not op_future.done():
@@ -529,15 +474,17 @@ class OrchestrationSystem:
     async def check_service_health(self, service, service_type, service_identifier=None):
         """Check if the service is healthy with smart failure handling:
         - During critical operations (robotic arm moving, scanning): Retry 10 times then EXIT program
-        - When idle: Refresh service proxy and continue
+        - When idle and server connection died: Attempt full reconnection (no exit)
+        - When idle and microscope offline: Drop microscope from active services and stop health check
+        - When idle and incubator/arm unreachable: Log and keep retrying (no exit)
         Note: We keep the server connection stable and only refresh the service reference when idle."""
         log_service_name_part = service_identifier if service_identifier else (service.id if hasattr(service, "id") else service_type)
         service_name = f"{service_type} ({log_service_name_part})"
-        
+
         logger.info(f"Health check loop started for {service_name}")
         consecutive_failures = 0
         max_failures = 10
-            
+
         while True:
             try:
                 # Set a timeout for the ping operation
@@ -546,112 +493,163 @@ class OrchestrationSystem:
                 if ping_result != "pong":
                     logger.error(f"{service_name} service ping check failed: {ping_result}")
                     raise Exception("Service not healthy")
-                
+
                 # Service is healthy - reset failure counter
                 if consecutive_failures > 0:
                     logger.info(f"{service_name} service recovered after {consecutive_failures} failures.")
                 consecutive_failures = 0
                 logger.debug(f"{service_name} service health check passed.")
-                
+
             except (asyncio.TimeoutError, Exception) as e:
                 consecutive_failures += 1
-                
+
                 if isinstance(e, asyncio.TimeoutError):
                     logger.warning(f"{service_name} service ping timed out (failure {consecutive_failures}/{max_failures}).")
                 else:
                     logger.warning(f"{service_name} service health check failed (failure {consecutive_failures}/{max_failures}): {e}")
-                
+
                 # Check if this specific service is in a critical operation
                 is_critical_for_service = False
                 if service_identifier is not None:
                     is_critical_for_service = (service_type, service_identifier) in self.critical_services
                 else:
-                    # Fallback: if no identifier, consider type-wide critical marking (rare)
                     is_critical_for_service = (service_type, None) in self.critical_services
 
                 if is_critical_for_service:
                     logger.warning(f"{service_name} health check failed during CRITICAL OPERATION (robotic arm moving or scanning).")
-                    
+
                     if consecutive_failures >= max_failures:
                         error_msg = f"{service_name} failed {max_failures} times during critical operation. Exiting program for safety."
                         logger.critical(error_msg)
                         logger.critical("Orchestrator will exit. Monitoring system will alert and restart.")
                         sys.exit(1)
-                    
-                    # Retry with longer delay during critical operations
-                    retry_delay = 10 * consecutive_failures  # 10s, 20s, 30s
+
+                    retry_delay = 10 * consecutive_failures  # 10s, 20s, 30s...
                     logger.warning(f"Will retry {service_name} health check in {retry_delay} seconds...")
                     await asyncio.sleep(retry_delay)
                     continue
-                
+
                 else:
-                    # Not in critical operation - safe to refresh service proxy
-                    logger.info(f"{service_name} health check failed while IDLE. Safe to refresh service proxy.")
-                    
+                    # Not in critical operation - safe to attempt refresh
+                    logger.info(f"{service_name} health check failed while IDLE. Attempting service proxy refresh.")
+
                     try:
                         await self._refresh_service_proxy(service_type, service_identifier)
                         logger.info(f"{service_name} service proxy refreshed successfully.")
-                        
-                        # CRITICAL FIX: Update the local service variable to point to the refreshed service object
+
+                        # Update the local service variable to the refreshed proxy
                         if service_type == 'incubator':
                             service = self.incubator
                         elif service_type == 'microscope' and service_identifier:
                             service = self.microscope_services.get(service_identifier)
                         elif service_type == 'robotic_arm':
                             service = self.robotic_arm
-                        
+
                         if service is None:
                             logger.error(f"Failed to get refreshed {service_name} service reference. Will retry.")
-                            consecutive_failures += 1  # Don't reset counter if we can't get the service
                             await asyncio.sleep(30)
                             continue
-                        
-                        consecutive_failures = 0  # Reset counter after successful refresh
-                        
+
+                        consecutive_failures = 0
+                        await asyncio.sleep(30)
+                        continue
+
+                    except ConnectionError as conn_err:
+                        # The local server connection itself is dead — attempt full reconnect
+                        logger.warning(f"{service_name}: server connection dead ({conn_err}). Attempting full reconnect...")
+                        try:
+                            await self._reset_and_reconnect_local_server()
+                            logger.info("Full reconnect succeeded. Resetting failure counter.")
+                            # Refresh our local service reference after reconnect
+                            if service_type == 'incubator':
+                                service = self.incubator
+                            elif service_type == 'microscope' and service_identifier:
+                                service = self.microscope_services.get(service_identifier)
+                            elif service_type == 'robotic_arm':
+                                service = self.robotic_arm
+                            consecutive_failures = 0
+                        except Exception as reconnect_err:
+                            logger.error(f"Full reconnect failed: {reconnect_err}. Will retry in 60 seconds.")
+                            await asyncio.sleep(60)
+                        continue
+
                     except Exception as refresh_error:
                         logger.error(f"Failed to refresh {service_name} service proxy: {refresh_error}")
-                        
+
                         if consecutive_failures >= max_failures:
-                            error_msg = f"{service_name} failed to refresh {max_failures} times even when idle. Exiting program."
-                            logger.critical(error_msg)
-                            logger.critical("Orchestrator will exit. Monitoring system will alert and restart.")
-                            sys.exit(1)
-                        
+                            if service_type == 'microscope':
+                                # An offline microscope should not crash the orchestrator.
+                                # Drop it from active services — it will be reconnected when a task needs it.
+                                logger.warning(
+                                    f"{service_name} unreachable after {max_failures} attempts. "
+                                    f"Removing from active services. Will reconnect when a task requires it."
+                                )
+                                if service_identifier and service_identifier in self.microscope_services:
+                                    del self.microscope_services[service_identifier]
+                                if service_identifier and service_identifier in self.sample_on_microscope_flags:
+                                    self.sample_on_microscope_flags[service_identifier] = False
+                                key = (service_type, service_identifier) if service_identifier else service_type
+                                self.health_check_tasks.pop(key, None)
+                                return  # Exit health check loop for this microscope
+                            else:
+                                # For incubator/robotic arm: log critical but keep retrying, don't exit.
+                                logger.critical(
+                                    f"{service_name} unreachable after {max_failures} attempts while idle. "
+                                    f"This is unexpected — check hardware. Resetting counter and continuing to retry."
+                                )
+                                consecutive_failures = 0
+
                         logger.info(f"Will retry {service_name} refresh in 60 seconds...")
                         await asyncio.sleep(60)
                         continue
-                    
-                    # Wait before checking health again after refresh to give service time to stabilize
-                    await asyncio.sleep(30)
-                    continue
-                
+
             await asyncio.sleep(30)  # Check every 30 seconds when healthy
+
+    _DEAD_CONNECTION_KEYWORDS = ("1011", "ping timeout", "no close frame", "keepalive", "connection closed", "websocket")
 
     async def _refresh_service_proxy(self, service_type, service_id):
         """Refresh a service proxy from the existing stable server connection.
-        This does NOT create a new server connection, just gets a fresh service reference."""
+        This does NOT create a new server connection, just gets a fresh service reference.
+        Raises ConnectionError if the underlying server connection appears dead."""
         if not self.local_server_connection:
-            raise Exception("Local server connection not available")
-        
-        if service_type == 'incubator':
-            logger.info(f"Refreshing incubator service proxy ({self.incubator_id})...")
-            self.incubator = await self.local_server_connection.get_service(self.incubator_id)
-            logger.info(f"Incubator service proxy refreshed.")
-            
-        elif service_type == 'microscope':
-            if not service_id:
-                raise Exception("Microscope service_id required for refresh")
-            logger.info(f"Refreshing microscope service proxy ({service_id})...")
-            microscope_service = await self.local_server_connection.get_service(service_id)
-            self.microscope_services[service_id] = microscope_service
-            logger.info(f"Microscope service proxy {service_id} refreshed.")
-            
-        elif service_type == 'robotic_arm':
-            logger.info(f"Refreshing robotic arm service proxy ({self.robotic_arm_id})...")
-            self.robotic_arm = await self.local_server_connection.get_service(self.robotic_arm_id)
-            logger.info(f"Robotic arm service proxy refreshed.")
-        else:
-            raise Exception(f"Unknown service type: {service_type}")
+            raise ConnectionError("Local server connection not available")
+
+        try:
+            if service_type == 'incubator':
+                logger.info(f"Refreshing incubator service proxy ({self.incubator_id})...")
+                self.incubator = await self.local_server_connection.get_service(self.incubator_id)
+                logger.info(f"Incubator service proxy refreshed.")
+
+            elif service_type == 'microscope':
+                if not service_id:
+                    raise Exception("Microscope service_id required for refresh")
+                logger.info(f"Refreshing microscope service proxy ({service_id})...")
+                microscope_service = await self.local_server_connection.get_service(service_id)
+                self.microscope_services[service_id] = microscope_service
+                logger.info(f"Microscope service proxy {service_id} refreshed.")
+
+            elif service_type == 'robotic_arm':
+                logger.info(f"Refreshing robotic arm service proxy ({self.robotic_arm_id})...")
+                self.robotic_arm = await self.local_server_connection.get_service(self.robotic_arm_id)
+                logger.info(f"Robotic arm service proxy refreshed.")
+            else:
+                raise Exception(f"Unknown service type: {service_type}")
+        except ConnectionError:
+            raise
+        except Exception as e:
+            err_lower = str(e).lower()
+            if any(kw in err_lower for kw in self._DEAD_CONNECTION_KEYWORDS):
+                raise ConnectionError(f"Server connection dead: {e}") from e
+            raise
+
+    async def _reset_and_reconnect_local_server(self):
+        """Null out the dead server connection and all service proxies, then reconnect."""
+        logger.warning("Resetting dead local server connection and all service proxies for full reconnect...")
+        self.local_server_connection = None
+        self.incubator = None
+        self.robotic_arm = None
+        self.microscope_services.clear()
+        return await self.setup_connections()
 
     async def disconnect_single_service(self, service_type, service_id_to_disconnect=None):
         """Clear a specific service reference and stop its health check."""
@@ -811,10 +809,26 @@ class OrchestrationSystem:
         if not target_microscope_service:
             raise Exception(f"Microscope service {microscope_id_str} is not connected.")
 
+        # Verify actual sample location from incubator service (source of truth)
+        # This protects against stale in-memory flags after a crash/restart
+        try:
+            robot_target_for_check = self._get_robot_microscope_id(microscope_id_str)
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Incubator reports sample location for slot {incubator_slot}: {actual_location}")
+            if actual_location == f"microscope{robot_target_for_check}":
+                self.sample_on_microscope_flags[microscope_id_str] = True
+                logger.info(f"Sample already on microscope {microscope_id_str} per incubator. Skipping load.")
+                return
+            elif actual_location == "incubator_slot":
+                self.sample_on_microscope_flags[microscope_id_str] = False
+            # For other locations (e.g. "robotic_arm"), fall through to the in-memory flag
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Falling back to in-memory flag.")
+
         if self.sample_on_microscope_flags.get(microscope_id_str, False):
-            logger.info(f"Sample plate already on microscope {microscope_id_str}")
-            return 
-            
+            logger.info(f"Sample plate already on microscope {microscope_id_str} (in-memory flag). Skipping load.")
+            return
+
         logger.info(f"Loading sample from incubator slot {incubator_slot} to microscope {microscope_id_str}...")
         
         # Mark critical operation
@@ -943,46 +957,30 @@ class OrchestrationSystem:
             logger.info("CRITICAL OPERATION END: Robotic arm unload complete")
             self._unmark_critical_services(critical_services)
 
-    async def _poll_scan_status(self, microscope_service, timeout_minutes=120):
+    async def _poll_scan_status(self, microscope_service):
         """
         Poll the scan status from microscope service using scan_get_status().
-        
+
         This method continuously polls the microscope service every 10 seconds to check
         the scan progress. It handles WebSocket interruptions gracefully by retrying
         failed status checks.
-        
-        CRITICAL: If scan times out, the program will exit immediately for safety.
-        
+
         Args:
             microscope_service: The microscope service proxy to poll
-            timeout_minutes: Maximum time in minutes to wait for scan completion (default: 120)
-            
+
         Returns:
             None when scan completes successfully
-            
+
         Raises:
-            TimeoutError: If scan doesn't complete within timeout_minutes (PROGRAM WILL EXIT)
             Exception: If scan fails or encounters an error
         """
         poll_interval = 10  # seconds between status checks
-        timeout_seconds = timeout_minutes * 60
-        start_time = time.time()
         consecutive_failures = 0
         max_consecutive_failures = 3
-        
-        logger.info(f"Starting scan status polling (timeout: {timeout_minutes} minutes, interval: {poll_interval}s)")
-        
+
+        logger.info(f"Starting scan status polling (interval: {poll_interval}s)")
+
         while True:
-            elapsed_time = time.time() - start_time
-            
-            # Check timeout - CRITICAL ERROR: Exit program immediately
-            if elapsed_time > timeout_seconds:
-                error_msg = f"CRITICAL: Scan operation timed out after {timeout_minutes} minutes ({timeout_minutes/60:.1f} hours)"
-                logger.critical(error_msg)
-                logger.critical("Scan timeout is a critical safety issue. Exiting program immediately.")
-                logger.critical("Monitoring system will alert and restart.")
-                sys.exit(1)  # Exit immediately - do not continue or attempt cleanup
-            
             try:
                 # Poll status from microscope service
                 status_response = await asyncio.wait_for(
@@ -1102,7 +1100,6 @@ class OrchestrationSystem:
                 pass
             
             try:
-                scan_timeout_minutes = task_config.get("scan_timeout_minutes", 120)
                 saved_data_type = task_config.get("saved_data_type", "raw_images_well_plate")
                 
                 logger.info(f"Building scan config for task {task_name}: saved_data_type={saved_data_type}")
@@ -1142,14 +1139,10 @@ class OrchestrationSystem:
                     logger.info(f"Flexible scan config: {len(scan_config['positions'])} positions")
                 
                 logger.info(f"Sending scan_config to microscope: saved_data_type={scan_config['saved_data_type']}")
-                logger.info(f"Scan timeout set to: {scan_timeout_minutes} minutes ({scan_timeout_minutes/60:.1f} hours)")
                 scan_result = await microscope_service.scan_start(config=scan_config)
-                
-                # Poll scan status until completion or timeout
-                # CRITICAL: If timeout occurs, program will exit immediately
+
                 await self._poll_scan_status(
                     microscope_service=microscope_service,
-                    timeout_minutes=scan_timeout_minutes
                 )
                 
             finally:
@@ -1214,7 +1207,7 @@ class OrchestrationSystem:
                     scan_config["move_for_autofocus"] = task_config["move_for_autofocus"]
             
             await microscope_service.scan_start(config=scan_config)
-            await self._poll_scan_status(microscope_service, task_config.get("scan_timeout_minutes", 120))
+            await self._poll_scan_status(microscope_service)
             
         finally:
             self.in_critical_operation = False
@@ -1450,9 +1443,6 @@ class OrchestrationSystem:
             logger.error("REEF_WORKSPACE_TOKEN is not set in environment. Cannot register orchestrator service.")
             return
 
-        # Store the main event loop for use in executor threads
-        self._main_event_loop = asyncio.get_event_loop()
-        
         server_config_for_registration = {
             "server_url": self.orchestrator_hypha_server_url,
             "ping_interval": 30,
@@ -1467,8 +1457,7 @@ class OrchestrationSystem:
             "name": "Orchestrator Manager",
             "id": self.orchestrator_hypha_service_id,
             "config": {
-                "visibility": "protected", 
-                "run_in_executor": True,
+                "visibility": "protected",
             },
             "ping": self.ping,
             "add_imaging_task": self.add_imaging_task,
@@ -1481,6 +1470,7 @@ class OrchestrationSystem:
             "get_transport_queue_status": self.get_transport_queue_status,
             "process_timelapse_offline": self.process_timelapse_offline_api,
             "scan_microscope_only": self.scan_microscope_only_api,
+            "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
         }
         
         registered_service = await self.orchestrator_hypha_server_connection.register_service(service_api)
@@ -1800,6 +1790,15 @@ class OrchestrationSystem:
             return {"error": str(e), "success": False}
 
     @schema_function(skip_self=True)
+    async def get_lab_video_stream_urls(self):
+        """Returns public Hypha URLs for all lab video stream services (lab cameras)."""
+        base = f"{self.orchestrator_hypha_server_url}/{self.workspace}/apps"
+        return {
+            "reef-lab-camera-1": f"{base}/reef-lab-camera-1",
+            "reef-lab-camera-2": f"{base}/reef-lab-camera-2",
+        }
+
+    @schema_function(skip_self=True)
     async def process_timelapse_offline_api(self, experiment_id: str, upload_immediately: bool = True, cleanup_temp_files: bool = True):
         """API wrapper for offline stitching and upload timelapse functionality."""
         logger.info(f"API call: process_timelapse_offline for experiment_id: {experiment_id}")
@@ -1845,9 +1844,8 @@ class OrchestrationSystem:
             return {"success": False, "message": str(e)}
 
     @schema_function(skip_self=True)
-    async def scan_microscope_only_api(self, microscope_id: str, scan_config: dict, 
-                                       task_name: str = None, action_id: str = None, 
-                                       timeout_minutes: int = 120):
+    async def scan_microscope_only_api(self, microscope_id: str, scan_config: dict,
+                                       task_name: str = None, action_id: str = None):
         """
         API endpoint to run a scan directly on a microscope without load/unload operations.
         
@@ -1873,7 +1871,6 @@ class OrchestrationSystem:
                 - do_reflection_af: bool (required for both)
             task_name: Optional task name to link for status tracking
             action_id: Optional custom action ID (auto-generated if not provided)
-            timeout_minutes: Scan timeout in minutes (default 120)
             
         Returns:
             Dictionary with success status, message, and scan details
@@ -2033,10 +2030,8 @@ class OrchestrationSystem:
             scan_result = await microscope_service.scan_start(config=full_scan_config)
             logger.info(f"Scan initiated successfully: {scan_result}")
             
-            # Poll scan status until completion or timeout
             await self._poll_scan_status(
                 microscope_service=microscope_service,
-                timeout_minutes=timeout_minutes
             )
             
             logger.info(f"Microscope-only scan completed successfully for action_id: {action_id}")
@@ -2053,16 +2048,6 @@ class OrchestrationSystem:
                 "microscope_id": microscope_id,
                 "scan_type": saved_data_type
             }
-            
-        except TimeoutError as e:
-            error_msg = f"Scan timed out after {timeout_minutes} minutes: {e}"
-            logger.error(error_msg)
-            
-            # Update linked task to error status
-            if task_name and task_name in self.tasks:
-                await self._update_task_state_and_write_config(task_name, status="error")
-            
-            return {"success": False, "message": error_msg, "action_id": action_id}
             
         except Exception as e:
             error_msg = f"Microscope-only scan failed: {e}"

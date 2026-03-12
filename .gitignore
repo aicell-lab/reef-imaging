@@ -190,3 +190,4 @@ reef_imaging/imaging_workflow_status.json
 # Configuration files
 config_simulation.json
 config.json
+reef_imaging/control/squid-control

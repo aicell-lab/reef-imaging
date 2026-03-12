@@ -11,7 +11,7 @@ REEF Imaging provides a comprehensive system for automated microscopy workflows,
 - **Data Management**: Cloud-based storage and organization through the Hypha platform with artifact management
 - **Orchestration**: Task-driven workflow automation with real-time status tracking and error recovery
 - **Remote Operation**: Mirror service architecture enabling secure cloud-to-local hardware control
-- **Live Monitoring**: Real-time camera streaming and experiment status visualization
+- **Live Monitoring**: Real-time camera streaming from lab USB cameras, Hamilton camera, and RealSense arm camera
 - **Image Processing**: Utilities for image manipulation, stitching, and format conversion
 
 ## Architecture
@@ -69,17 +69,23 @@ Check out our system demonstration video:
 ## Project Structure
 
 - **reef_imaging/** - Main package
-- **control/** - Hardware control modules
-  - **dorna-control/** - Control for Dorna robotic arm
-  - **cytomat-control/** - Control for Cytomat incubator
-  - **squid-control/** - Control for SQUID microscope (includes built-in mirror functionality)
-  - **mirror-services/** - Services for mirroring data between cloud and local systems (robotic arm and incubator only)
+  - **orchestrator.py** - Main orchestration system
+  - **hypha_service.py** - Hypha service integration
+  - **control/** - Hardware control modules
+    - **dorna-control/** - Control for Dorna robotic arm
+    - **cytomat-control/** - Control for Cytomat incubator
+    - **squid-control/** - Control for SQUID microscope (includes built-in mirror functionality)
+    - **mirror-services/** - Services for mirroring data between cloud and local systems (robotic arm and incubator only)
   - **hypha_tools/** - Utilities for working with the Hypha platform
     - **artifact_manager/** - Tools for interacting with Hypha's artifact management system
     - **automated_treatment_uploader.py** - Uploads time-lapse experiment data
     - **automated_stitch_uploader.py** - Processes and uploads stitched images
-  - **orchestrator.py** - Main orchestration system
-  - **hypha_service.py** - Hypha service integration
+  - **lab_live_stream/** - Camera livestream services
+    - **lab_cameras.py** - 2× USB lab cameras on Linux (services: `reef-lab-camera-1`, `reef-lab-camera-2`)
+    - **realsense_camera.py** - RealSense camera on robotic arm (service: `reef-realsense-feed`)
+    - **hamilton_camera.py** - Camera on Hamilton Windows PC (service: `reef-hamilton-feed`)
+    - **lab_cameras_watchdog.py** - Linux systemd watchdog for lab cameras
+    - **hamilton_watchdog.py** - Windows NSSM watchdog for Hamilton camera
 
 ## Installation
 
@@ -185,6 +191,22 @@ cd reef_imaging/control/mirror-services
 python mirror_incubator.py
 python mirror_robotic_arm.py
 ```
+
+### Starting Lab Camera Services (Linux)
+
+The lab camera service auto-detects connected USB cameras and registers them as Hypha streams:
+
+```bash
+# Run directly
+python reef_imaging/lab_live_stream/lab_cameras.py
+
+# Or via systemd (after installation)
+sudo systemctl start lab-cameras
+sudo systemctl start lab-cameras-watchdog
+```
+
+Live stream URLs can be retrieved via the orchestrator tool `get_lab_video_stream_urls`.
+See `reef_imaging/lab_live_stream/README.md` for full setup and watchdog instructions.
 
 ## Environment Setup
 
