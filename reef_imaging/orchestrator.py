@@ -45,6 +45,7 @@ if ENV_FILE:
     dotenv.load_dotenv(ENV_FILE)
 
 CONFIG_FILE_PATH = "config.json"
+CONFIG_FILE_PATH_TMP = "config.json.tmp"
 CONFIG_READ_INTERVAL = 10 # Seconds to wait before re-reading config.json
 ORCHESTRATOR_LOOP_SLEEP = 5 # Seconds to sleep in main loop when no immediate task is due
 
@@ -425,8 +426,9 @@ class OrchestrationSystem:
                 output_config_data["samples"].append(sample_entry)
             
             try:
-                with open(CONFIG_FILE_PATH, 'w') as f_write:
+                with open(CONFIG_FILE_PATH_TMP, 'w') as f_write:
                     json.dump(output_config_data, f_write, indent=4)
+                os.replace(CONFIG_FILE_PATH_TMP, CONFIG_FILE_PATH)
             except (IOError, OSError) as e:
                 logger.error(f"Error writing tasks state to {CONFIG_FILE_PATH}: {e}")
                 
@@ -1636,8 +1638,9 @@ class OrchestrationSystem:
                     }
                     config_data["samples"].append(new_task_entry)
 
-                with open(CONFIG_FILE_PATH, 'w') as f:
+                with open(CONFIG_FILE_PATH_TMP, 'w') as f:
                     json.dump(config_data, f, indent=4)
+                os.replace(CONFIG_FILE_PATH_TMP, CONFIG_FILE_PATH)
                 logger.info(f"Task '{task_name}' processed (added/updated) in {CONFIG_FILE_PATH}.")
 
             except Exception as e:
@@ -1675,8 +1678,9 @@ class OrchestrationSystem:
                     logger.warning(f"Task '{task_name}' not found in {CONFIG_FILE_PATH}. No deletion occurred.")
                     return {"success": False, "message": f"Task '{task_name}' not found."}
 
-                with open(CONFIG_FILE_PATH, 'w') as f:
+                with open(CONFIG_FILE_PATH_TMP, 'w') as f:
                     json.dump(config_data, f, indent=4)
+                os.replace(CONFIG_FILE_PATH_TMP, CONFIG_FILE_PATH)
                 logger.info(f"Task '{task_name}' deleted from {CONFIG_FILE_PATH}.")
 
             except Exception as e:
@@ -1721,7 +1725,7 @@ class OrchestrationSystem:
                 return [] 
             except json.JSONDecodeError:
                 logger.error(f"Error decoding JSON from {CONFIG_FILE_PATH} when getting all tasks.")
-                return {"error": "Failed to decode configuration file.", "success": False}
+                return []
             except Exception as e:
                 logger.error(f"Failed to get all imaging tasks: {e}", exc_info=True)
                 return {"error": str(e), "success": False}

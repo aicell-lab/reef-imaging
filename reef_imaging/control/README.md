@@ -124,6 +124,7 @@ python start_hypha_service_robotic_arm.py --local
 # Start microscope control
 cd squid-control
 python start_hypha_service_squid_control.py --local
+```
 
 ## Service Architecture
 
