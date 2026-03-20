@@ -9,6 +9,19 @@ from hypha_rpc.utils.schema import schema_function
 import logging
 import logging.handlers
 import time
+from typing import Dict, Any
+
+# Import standardized responses
+try:
+    from reef_imaging.utils.responses import ApiResponse, ErrorCode, create_success_response, create_error_response
+    USE_STANDARD_RESPONSES = True
+except ImportError:
+    USE_STANDARD_RESPONSES = False
+    # Fallback if utils not available
+    def create_success_response(data=None, message=None):
+        return data if data is not None else message
+    def create_error_response(message, error_code=None, data=None):
+        raise Exception(message)
 
 dotenv.load_dotenv()  
 ENV_FILE = dotenv.find_dotenv()  
@@ -37,12 +50,14 @@ def setup_logging(log_file="robotic_arm_service.log", max_bytes=100000, backup_c
 logger = setup_logging()
 
 class RoboticArmService:
-    def __init__(self, local, simulation=False):
+    def __init__(self, local, simulation=False, robot_ip=None):
         self.local = local
         self.simulation = simulation
         self.server_url = "http://localhost:9527" if local else "https://hypha.aicell.io"
         self.robot = Dorna() if not simulation else None
-        self.ip = "192.168.2.20"
+        # Use provided IP, environment variable, or default
+        self.ip = robot_ip or os.environ.get("DORNA_ROBOT_IP", "192.168.2.20")
+        logger.info(f"Using robot IP: {self.ip}")
         self.connected = False
         self.server = None
         self.service_id = "robotic-arm-control" + ("-simulation" if simulation else "")
@@ -643,9 +658,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start the Hypha service for the robotic arm.")
     parser.add_argument('--local', action='store_true', help="Use localhost as server URL")
     parser.add_argument('--simulation', action='store_true', help="Run in simulation mode")
+    parser.add_argument('--robot-ip', type=str, help="Robot IP address (default: 192.168.2.20 or DORNA_ROBOT_IP env var)")
     args = parser.parse_args()
 
-    robotic_arm_service = RoboticArmService(local=args.local, simulation=args.simulation)
+    robotic_arm_service = RoboticArmService(local=args.local, simulation=args.simulation, robot_ip=args.robot_ip)
 
     loop = asyncio.get_event_loop()
 

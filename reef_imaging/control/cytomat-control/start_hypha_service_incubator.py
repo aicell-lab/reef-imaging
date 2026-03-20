@@ -5,12 +5,24 @@ from hypha_rpc import connect_to_server, login
 from cytomat import Cytomat
 from pydantic import Field
 from hypha_rpc.utils.schema import schema_function
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import dotenv
 import json
 import logging
 import logging.handlers
 import time
+
+# Import standardized responses
+try:
+    from reef_imaging.utils.responses import ApiResponse, ErrorCode, create_success_response, create_error_response
+    USE_STANDARD_RESPONSES = True
+except ImportError:
+    USE_STANDARD_RESPONSES = False
+    # Fallback if utils not available
+    def create_success_response(data=None, message=None):
+        return data if data is not None else message
+    def create_error_response(message, error_code=None, data=None):
+        raise Exception(message)
 
 dotenv.load_dotenv()  
 ENV_FILE = dotenv.find_dotenv()  
@@ -69,8 +81,20 @@ class IncubatorService:
         # Use provided port, environment variable, or default to /dev/ttyUSB0
         port = serial_port or os.environ.get("CYPOMAT_SERIAL_PORT", "/dev/ttyUSB0")
         logger.info(f"Using serial port: {port}")
-        self.c = Cytomat(port, json_path="/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/docs/config.json") if not simulation else None
-        self.samples_file = "/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/samples.json"
+        
+        # Use relative paths from module location or environment variables
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        default_config_path = os.path.join(module_dir, "docs", "config.json")
+        default_samples_path = os.path.join(module_dir, "samples.json")
+        
+        config_path = os.environ.get("CYTOMAT_CONFIG_PATH", default_config_path)
+        samples_path = os.environ.get("CYTOMAT_SAMPLES_PATH", default_samples_path)
+        
+        logger.info(f"Using config path: {config_path}")
+        logger.info(f"Using samples path: {samples_path}")
+        
+        self.c = Cytomat(port, json_path=config_path) if not simulation else None
+        self.samples_file = samples_path
         self.server = None
         self.service_id = "incubator-control" + ("-simulation" if simulation else "")
         self.setup_task = None

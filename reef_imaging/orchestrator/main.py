@@ -20,8 +20,21 @@ from datetime import datetime, timezone, timedelta
 import argparse
 import json
 import copy
+from typing import Dict, Any, Optional
 
 from .config import ConfigManager, Task
+
+# Import standardized responses
+try:
+    from reef_imaging.utils.responses import ApiResponse, ErrorCode, create_success_response, create_error_response
+    USE_STANDARD_RESPONSES = True
+except ImportError:
+    USE_STANDARD_RESPONSES = False
+    # Fallback if utils not available
+    def create_success_response(data=None, message=None):
+        return {"success": True, "data": data, "message": message}
+    def create_error_response(message, error_code=None, data=None):
+        return {"success": False, "message": message, "error_code": error_code}
 
 # Set up logging
 def setup_logging(log_file="orchestrator.log", max_bytes=10*1024*1024, backup_count=5):
@@ -542,21 +555,24 @@ class OrchestrationSystem:
                 
         logger.info("Disconnect process completed.")
 
-    async def load_plate_from_incubator_to_microscope_api(self, incubator_slot: int, microscope_id: str):
-        """API endpoint to load a plate from incubator to microscope."""
+    async def load_plate_from_incubator_to_microscope_api(self, incubator_slot: int, microscope_id: str) -> Dict[str, Any]:
+        """API endpoint to load a plate from incubator to microscope. Returns standardized response."""
         logger.info(f"API call: load_plate_from_incubator_to_microscope for slot {incubator_slot} to microscope {microscope_id}")
         
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
-            return {"success": False, "message": msg}
+            return create_error_response(msg, ErrorCode.NOT_FOUND)
 
         try:
             await self._queue_transport_operation("load", incubator_slot, microscope_id)
-            return {"success": True, "message": f"Load task for slot {incubator_slot} to microscope {microscope_id} completed."}
+            return create_success_response(
+                data={"slot": incubator_slot, "microscope_id": microscope_id},
+                message=f"Load task for slot {incubator_slot} to microscope {microscope_id} completed."
+            )
         except Exception as e:
             logger.error(f"Load operation failed: {e}", exc_info=True)
-            return {"success": False, "message": str(e)}
+            return create_error_response(str(e), ErrorCode.OPERATION_FAILED)
 
     async def _execute_load_operation(self, incubator_slot: int, microscope_id_str: str):
         """Execute the load operation: move sample from incubator to microscope."""
@@ -629,21 +645,24 @@ class OrchestrationSystem:
             logger.info("CRITICAL OPERATION END: Robotic arm load complete")
             self._unmark_critical_services(critical_services)
 
-    async def unload_plate_from_microscope_api(self, incubator_slot: int, microscope_id: str):
-        """API endpoint to unload a plate from microscope to incubator."""
+    async def unload_plate_from_microscope_api(self, incubator_slot: int, microscope_id: str) -> Dict[str, Any]:
+        """API endpoint to unload a plate from microscope to incubator. Returns standardized response."""
         logger.info(f"API call: unload_plate_from_microscope for slot {incubator_slot} from microscope {microscope_id}")
         
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
-            return {"success": False, "message": msg}
+            return create_error_response(msg, ErrorCode.NOT_FOUND)
 
         try:
             await self._queue_transport_operation("unload", incubator_slot, microscope_id)
-            return {"success": True, "message": f"Unload task for slot {incubator_slot} from microscope {microscope_id} completed."}
+            return create_success_response(
+                data={"slot": incubator_slot, "microscope_id": microscope_id},
+                message=f"Unload task for slot {incubator_slot} from microscope {microscope_id} completed."
+            )
         except Exception as e:
             logger.error(f"Unload operation failed: {e}", exc_info=True)
-            return {"success": False, "message": str(e)}
+            return create_error_response(str(e), ErrorCode.OPERATION_FAILED)
 
     async def _execute_unload_operation(self, incubator_slot: int, microscope_id_str: str):
         """Execute the unload operation: move sample from microscope to incubator."""
@@ -1374,41 +1393,41 @@ class OrchestrationSystem:
         return {"success": True, "message": f"Task '{task_name}' added/updated successfully."}
 
     @schema_function(skip_self=True)
-    async def delete_imaging_task(self, task_name: str):
-        """Deletes an imaging task from the configuration."""
+    async def delete_imaging_task(self, task_name: str) -> Dict[str, Any]:
+        """Deletes an imaging task from the configuration. Returns standardized response."""
         logger.info(f"Attempting to delete imaging task: {task_name}")
         if not task_name:
-            return {"success": False, "message": "Task name cannot be empty."}
+            return create_error_response("Task name cannot be empty.", ErrorCode.INVALID_PARAMETER)
 
         # Delete task using ConfigManager
         success = await self.config_manager.delete_task(task_name, tasks=self.tasks)
         
         if not success:
-            return {"success": False, "message": f"Task '{task_name}' not found or could not be deleted."}
+            return create_error_response(f"Task '{task_name}' not found or could not be deleted.", ErrorCode.NOT_FOUND)
         
         await self._load_and_update_tasks() # Refresh orchestrator's internal task list
-        return {"success": True, "message": f"Task '{task_name}' deleted successfully."}
+        return create_success_response(message=f"Task '{task_name}' deleted successfully.")
 
     @schema_function(skip_self=True)
-    async def pause_imaging_task(self, task_name: str):
-        """Pauses an imaging task, preventing it from being processed until resumed."""
+    async def pause_imaging_task(self, task_name: str) -> Dict[str, Any]:
+        """Pauses an imaging task, preventing it from being processed until resumed. Returns standardized response."""
         if task_name not in self.tasks:
-            return {"success": False, "message": f"Task '{task_name}' not found."}
+            return create_error_response(f"Task '{task_name}' not found.", ErrorCode.NOT_FOUND)
         if self.tasks[task_name]["status"] == "paused":
-            return {"success": True, "message": f"Task '{task_name}' is already paused."}
+            return create_success_response(message=f"Task '{task_name}' is already paused.")
         await self._update_task_state_and_write_config(task_name, status="paused")
-        return {"success": True, "message": f"Task '{task_name}' paused."}
+        return create_success_response(message=f"Task '{task_name}' paused.")
 
     @schema_function(skip_self=True)
-    async def resume_imaging_task(self, task_name: str):
-        """Resumes a paused imaging task, allowing it to be processed again."""
+    async def resume_imaging_task(self, task_name: str) -> Dict[str, Any]:
+        """Resumes a paused imaging task, allowing it to be processed again. Returns standardized response."""
         if task_name not in self.tasks:
-            return {"success": False, "message": f"Task '{task_name}' not found."}
+            return create_error_response(f"Task '{task_name}' not found.", ErrorCode.NOT_FOUND)
         if self.tasks[task_name]["status"] != "paused":
-            return {"success": False, "message": f"Task '{task_name}' is not paused."}
+            return create_error_response(f"Task '{task_name}' is not paused.", ErrorCode.INVALID_PARAMETER)
         new_status = "completed" if not self.tasks[task_name]["config"].get("pending_datetimes") else "pending"
         await self._update_task_state_and_write_config(task_name, status=new_status)
-        return {"success": True, "message": f"Task '{task_name}' resumed."}
+        return create_success_response(message=f"Task '{task_name}' resumed.")
 
     @schema_function(skip_self=True)
     async def get_all_imaging_tasks(self):
@@ -1418,8 +1437,8 @@ class OrchestrationSystem:
         return samples
 
     @schema_function(skip_self=True)
-    async def get_transport_queue_status(self):
-        """Returns the current status of the transport queue and worker."""
+    async def get_transport_queue_status(self) -> Dict[str, Any]:
+        """Returns the current status of the transport queue and worker. Returns standardized response."""
         logger.debug("Getting transport queue status")
         try:
             # Get queue size (items waiting, not including current operation)
@@ -1474,11 +1493,11 @@ class OrchestrationSystem:
                     status_info["worker_error"] = "Unknown error retrieving exception details"
             
             logger.debug(f"Transport queue status: {status_info}")
-            return status_info
+            return create_success_response(data=status_info)
             
         except Exception as e:
             logger.error(f"Failed to get transport queue status: {e}", exc_info=True)
-            return {"error": str(e), "success": False}
+            return create_error_response(str(e), ErrorCode.INTERNAL_ERROR)
 
     @schema_function(skip_self=True)
     async def get_lab_video_stream_urls(self):
@@ -1490,14 +1509,14 @@ class OrchestrationSystem:
         }
 
     @schema_function(skip_self=True)
-    async def process_timelapse_offline_api(self, experiment_id: str, upload_immediately: bool = True, cleanup_temp_files: bool = True):
-        """API wrapper for offline stitching and upload timelapse functionality."""
+    async def process_timelapse_offline_api(self, experiment_id: str, upload_immediately: bool = True, cleanup_temp_files: bool = True) -> Dict[str, Any]:
+        """API wrapper for offline stitching and upload timelapse functionality. Returns standardized response."""
         logger.info(f"API call: process_timelapse_offline for experiment_id: {experiment_id}")
         
         # Find matching tasks
         matching_tasks = [name for name in self.tasks.keys() if experiment_id in name]
         if not matching_tasks:
-            return {"success": False, "message": f"No tasks found matching experiment_id: {experiment_id}"}
+            return create_error_response(f"No tasks found matching experiment_id: {experiment_id}", ErrorCode.NOT_FOUND)
         
         # Set tasks to uploading status
         for task_name in matching_tasks:
@@ -1525,46 +1544,27 @@ class OrchestrationSystem:
             for task_name in matching_tasks:
                 await self._update_task_state_and_write_config(task_name, status="completed")
             
-            return {"success": True, "message": f"Offline processing completed for {len(matching_tasks)} tasks", "result": result}
+            return create_success_response(
+                data=result,
+                message=f"Offline processing completed for {len(matching_tasks)} tasks"
+            )
             
         except Exception as e:
             logger.error(f"Offline processing failed for experiment_id {experiment_id}: {e}")
             # Set tasks to error status
             for task_name in matching_tasks:
                 await self._update_task_state_and_write_config(task_name, status="error")
-            return {"success": False, "message": str(e)}
+            return create_error_response(str(e), ErrorCode.OPERATION_FAILED)
 
     @schema_function(skip_self=True)
     async def scan_microscope_only_api(self, microscope_id: str, scan_config: dict,
-                                       task_name: str = None, action_id: str = None):
+                                       task_name: str = None, action_id: str = None) -> Dict[str, Any]:
         """
         API endpoint to run a scan directly on a microscope without load/unload operations.
+        Returns standardized response.
         
         This bypasses robotic arm and incubator integration, assuming the sample is already
         manually placed on the microscope. Can optionally link to an existing task for status tracking.
-        
-        Args:
-            microscope_id: ID of the microscope to use (e.g., 'microscope-squid-1')
-            scan_config: Scan configuration dictionary containing:
-                - saved_data_type: 'raw_images_well_plate' or 'raw_image_flexible'
-                - For 'raw_images_well_plate':
-                    - wells_to_scan: List[str] (e.g., ['A1', 'B2'])
-                    - Nx, Ny: int (grid dimensions)
-                    - dx, dy: float (position intervals in mm)
-                    - well_plate_type: str (optional, default '96')
-                    - focus_map_points: List[List[float]] (optional): 3 reference points [[x,y,z], [x,y,z], [x,y,z]] in mm for focus interpolation
-                - For 'raw_image_flexible':
-                    - positions: List[dict] with x, y, z, Nx, Ny, Nz, dx, dy, dz, name
-                    - focus_map_points: List[List[float]] (optional): 3 reference points [[x,y,z], [x,y,z], [x,y,z]] in mm for focus interpolation
-                    - move_for_autofocus: bool (optional): Whether to move stage for autofocus
-                - illumination_settings: List[dict] (required for both)
-                - do_contrast_autofocus: bool (required for both)
-                - do_reflection_af: bool (required for both)
-            task_name: Optional task name to link for status tracking
-            action_id: Optional custom action ID (auto-generated if not provided)
-            
-        Returns:
-            Dictionary with success status, message, and scan details
         """
         logger.info(f"API call: scan_microscope_only for microscope {microscope_id}, task_name={task_name}")
         
@@ -1572,13 +1572,13 @@ class OrchestrationSystem:
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
-            return {"success": False, "message": msg}
+            return create_error_response(msg, ErrorCode.NOT_FOUND)
         
         # Validate scan_config
         if not isinstance(scan_config, dict):
             msg = "scan_config must be a dictionary"
             logger.error(msg)
-            return {"success": False, "message": msg}
+            return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
         
         # Validate required fields
         required_fields = ["saved_data_type", "illumination_settings", "do_contrast_autofocus", "do_reflection_af"]
@@ -1586,13 +1586,13 @@ class OrchestrationSystem:
             if field not in scan_config:
                 msg = f"Missing required field '{field}' in scan_config"
                 logger.error(msg)
-                return {"success": False, "message": msg}
+                return create_error_response(msg, ErrorCode.MISSING_PARAMETER)
         
         saved_data_type = scan_config["saved_data_type"]
         if saved_data_type not in ["raw_images_well_plate", "raw_image_flexible"]:
             msg = f"Invalid saved_data_type '{saved_data_type}'. Must be 'raw_images_well_plate' or 'raw_image_flexible'"
             logger.error(msg)
-            return {"success": False, "message": msg}
+            return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
         
         # Validate type-specific fields
         if saved_data_type == "raw_images_well_plate":
@@ -1601,22 +1601,22 @@ class OrchestrationSystem:
                 if field not in scan_config:
                     msg = f"Missing required field '{field}' for raw_images_well_plate scan type"
                     logger.error(msg)
-                    return {"success": False, "message": msg}
+                    return create_error_response(msg, ErrorCode.MISSING_PARAMETER)
         elif saved_data_type == "raw_image_flexible":
             if "positions" not in scan_config:
                 msg = "Missing required field 'positions' for raw_image_flexible scan type"
                 logger.error(msg)
-                return {"success": False, "message": msg}
+                return create_error_response(msg, ErrorCode.MISSING_PARAMETER)
             if not isinstance(scan_config["positions"], list) or len(scan_config["positions"]) == 0:
                 msg = "'positions' must be a non-empty list for raw_image_flexible scan type"
                 logger.error(msg)
-                return {"success": False, "message": msg}
+                return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
             # Validate move_for_autofocus if provided (optional for raw_image_flexible)
             if "move_for_autofocus" in scan_config:
                 if not isinstance(scan_config["move_for_autofocus"], bool):
                     msg = "'move_for_autofocus' must be a boolean for raw_image_flexible scan type"
                     logger.error(msg)
-                    return {"success": False, "message": msg}
+                    return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
         
         # Validate focus_map_points if provided (optional for both scan types)
         if "focus_map_points" in scan_config:
@@ -1624,27 +1624,27 @@ class OrchestrationSystem:
             if not isinstance(focus_map_points, list):
                 msg = "'focus_map_points' must be a list"
                 logger.error(msg)
-                return {"success": False, "message": msg}
+                return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
             if len(focus_map_points) != 3:
                 msg = f"'focus_map_points' must contain exactly 3 reference points (got {len(focus_map_points)})"
                 logger.error(msg)
-                return {"success": False, "message": msg}
+                return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
             for idx, point in enumerate(focus_map_points):
                 if not isinstance(point, list):
                     msg = f"Focus map point {idx} must be a list [x, y, z]"
                     logger.error(msg)
-                    return {"success": False, "message": msg}
+                    return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
                 if len(point) != 3:
                     msg = f"Focus map point {idx} must have exactly 3 coordinates [x, y, z] (got {len(point)})"
                     logger.error(msg)
-                    return {"success": False, "message": msg}
+                    return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
                 try:
                     # Validate that all elements are numeric
                     [float(coord) for coord in point]
                 except (ValueError, TypeError):
                     msg = f"Focus map point {idx} must contain numeric coordinates [x, y, z] in mm"
                     logger.error(msg)
-                    return {"success": False, "message": msg}
+                    return create_error_response(msg, ErrorCode.INVALID_PARAMETER)
         
         # Ensure microscope service is connected
         try:
@@ -1658,7 +1658,7 @@ class OrchestrationSystem:
         except Exception as e:
             msg = f"Failed to connect to microscope {microscope_id}: {e}"
             logger.error(msg)
-            return {"success": False, "message": msg}
+            return create_error_response(msg, ErrorCode.CONN_FAILED)
         
         # Optional task linking - verify task exists and update status
         if task_name:
@@ -1732,13 +1732,14 @@ class OrchestrationSystem:
                 logger.info(f"Updating linked task '{task_name}' status to 'waiting_for_next_run'")
                 await self._update_task_state_and_write_config(task_name, status="waiting_for_next_run")
             
-            return {
-                "success": True, 
-                "message": f"Microscope-only scan completed successfully on {microscope_id}",
-                "action_id": action_id,
-                "microscope_id": microscope_id,
-                "scan_type": saved_data_type
-            }
+            return create_success_response(
+                data={
+                    "action_id": action_id,
+                    "microscope_id": microscope_id,
+                    "scan_type": saved_data_type
+                },
+                message=f"Microscope-only scan completed successfully on {microscope_id}"
+            )
             
         except Exception as e:
             error_msg = f"Microscope-only scan failed: {e}"
@@ -1748,7 +1749,7 @@ class OrchestrationSystem:
             if task_name and task_name in self.tasks:
                 await self._update_task_state_and_write_config(task_name, status="error")
             
-            return {"success": False, "message": error_msg, "action_id": action_id}
+            return create_error_response(error_msg, ErrorCode.OPERATION_FAILED, {"action_id": action_id})
             
         finally:
             # Always reset critical operation flag after scanning
