@@ -1,6 +1,6 @@
 services:
   traefik:
-    image: "traefik:v2.5.3"
+    image: "traefik:v2.11"
     restart: always
     command:
       - --entrypoints.web.address=:80
@@ -8,7 +8,7 @@ services:
       - --entrypoints.web.http.redirections.entryPoint.scheme=https
       - --entrypoints.websecure.address=:443
       - --providers.docker
-      - --log.level=DEBUG
+      - --log.level=INFO
       - --log.filePath=/logs/traefik.log
       - --api
       # - --certificatesresolvers.leresolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
@@ -27,6 +27,8 @@ services:
       - "8080:8080"
     networks:
       - hypha-app-engine
+    environment:
+      - DOCKER_API_VERSION=1.41
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./acme:/acme"
