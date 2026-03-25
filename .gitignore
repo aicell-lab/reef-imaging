@@ -172,7 +172,8 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-
+# logs
+*.log.*
 ##webpage
 node_modules/
 package-lock.json
@@ -191,3 +192,4 @@ reef_imaging/imaging_workflow_status.json
 config_simulation.json
 config.json
 reef_imaging/control/squid-control
+*.gz
