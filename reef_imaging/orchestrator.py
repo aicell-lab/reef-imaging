@@ -61,6 +61,8 @@ ORCHESTRATOR_LOOP_SLEEP = 5 # Seconds to sleep in main loop when no immediate ta
 class OrchestrationSystem:
     def __init__(self):
         self.server_url = "http://reef.dyn.scilifelab.se:9527"
+        self.local_workspace = os.environ.get("REEF_LOCAL_WORKSPACE")
+        self.local_token = os.environ.get("REEF_LOCAL_TOKEN")
         
         # Orchestrator's own Hypha service registration details
         self.orchestrator_hypha_server_url = "https://hypha.aicell.io"
@@ -188,6 +190,50 @@ class OrchestrationSystem:
             "blocked_by": [blocker.to_dict() for blocker in busy_error.blockers],
         }
         return response
+
+    def _build_service_api(self) -> dict:
+        return {
+            "name": "Orchestrator Manager",
+            "id": self.orchestrator_hypha_service_id,
+            "config": {
+                "visibility": "protected",
+            },
+            "ping": self.ping,
+            "add_imaging_task": self.add_imaging_task,
+            "delete_imaging_task": self.delete_imaging_task,
+            "pause_imaging_task": self.pause_imaging_task,
+            "resume_imaging_task": self.resume_imaging_task,
+            "get_all_imaging_tasks": self.get_all_imaging_tasks,
+            "load_plate_from_incubator_to_microscope": self.load_plate_from_incubator_to_microscope_api,
+            "unload_plate_from_microscope": self.unload_plate_from_microscope_api,
+            "get_transport_queue_status": self.get_transport_queue_status,
+            "get_runtime_status": self.get_runtime_status,
+            "get_incubator_samples": self.get_incubator_samples,
+            "cancel_microscope_scan": self.cancel_microscope_scan,
+            "halt_robotic_arm": self.halt_robotic_arm,
+            "process_timelapse_offline": self.process_timelapse_offline_api,
+            "scan_microscope_only": self.scan_microscope_only_api,
+            "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
+        }
+
+    async def _ensure_local_server_connection(self):
+        if not self.local_token:
+            logger.error("REEF_LOCAL_TOKEN not set. Cannot setup local connection.")
+            return None
+        if not self.local_workspace:
+            logger.error("REEF_LOCAL_WORKSPACE not set. Cannot setup local connection.")
+            return None
+
+        if not self.local_server_connection:
+            logger.info(f"Creating stable connection to local Hypha server: {self.server_url}")
+            self.local_server_connection = await connect_to_server({
+                "server_url": self.server_url,
+                "token": self.local_token,
+                "workspace": self.local_workspace,
+                "ping_interval": 30,
+            })
+            logger.info("Stable server connection established.")
+        return self.local_server_connection
 
     async def _start_health_check(self, service_type, service_instance, service_identifier=None): # MODIFIED signature
         key = (service_type, service_identifier) if service_identifier else service_type
@@ -752,38 +798,21 @@ class OrchestrationSystem:
     async def setup_connections(self): 
         """Set up ONE stable connection to local Hypha server and get all service proxies.
         The server connection is kept alive throughout, only service proxies are refreshed on failures."""
-        operational_token = os.environ.get("REEF_LOCAL_TOKEN")
-        operational_workspace = os.environ.get("REEF_LOCAL_WORKSPACE")
-        
-        if not operational_token: 
-            logger.error("REEF_LOCAL_TOKEN not set. Cannot setup local connections.")
-            return False
-        if not operational_workspace:
-            logger.error("REEF_LOCAL_WORKSPACE not set. Cannot setup local connections.")
-            return False
-
-        # Create or reuse the stable server connection
         try:
-            if not self.local_server_connection:
-                logger.info(f"Creating stable connection to local Hypha server: {self.server_url}")
-                self.local_server_connection = await connect_to_server({
-                    "server_url": self.server_url, 
-                    "token": operational_token,
-                    "workspace": operational_workspace,
-                    "ping_interval": 30
-                })
-                logger.info("Stable server connection established.")
-            else:
-                logger.info("Reusing existing stable server connection.")
-            
+            connection = await self._ensure_local_server_connection()
+            if not connection:
+                return False
+
+            logger.info("Reusing existing stable server connection.")
+
             # Get service proxies from the stable connection
             if not self.incubator:
-                self.incubator = await self.local_server_connection.get_service(self.incubator_id)
+                self.incubator = await connection.get_service(self.incubator_id)
                 logger.info(f"Incubator ({self.incubator_id}) service proxy obtained.")
                 await self._start_health_check('incubator', self.incubator, self.incubator_id)
                 
             if not self.robotic_arm:
-                self.robotic_arm = await self.local_server_connection.get_service(self.robotic_arm_id)
+                self.robotic_arm = await connection.get_service(self.robotic_arm_id)
                 logger.info(f"Robotic arm ({self.robotic_arm_id}) service proxy obtained.")
                 await self._start_health_check('robotic_arm', self.robotic_arm, self.robotic_arm_id)
             
@@ -802,7 +831,7 @@ class OrchestrationSystem:
             if mic_id not in self.microscope_services: 
                 logger.info(f"Getting service proxy for microscope: {mic_id}...")
                 try:
-                    microscope_service_instance = await self.local_server_connection.get_service(mic_id)
+                    microscope_service_instance = await connection.get_service(mic_id)
                     self.microscope_services[mic_id] = microscope_service_instance
                     if mic_id not in self.sample_on_microscope_flags:
                         self.sample_on_microscope_flags[mic_id] = False
@@ -1614,43 +1643,60 @@ class OrchestrationSystem:
         self._refresh_legacy_active_task_name()
 
     async def _register_self_as_hypha_service(self):
-        logger.info(f"Registering orchestrator as a Hypha service with ID '{self.orchestrator_hypha_service_id}' on server '{self.orchestrator_hypha_server_url}' in workspace '{self.workspace}'")
-        if not self.token_for_orchestrator_registration:
-            logger.error("REEF_WORKSPACE_TOKEN is not set in environment. Cannot register orchestrator service.")
-            return
+        registration_succeeded = False
 
-        server_config_for_registration = {
-            "server_url": self.orchestrator_hypha_server_url,
-            "ping_interval": 30,
-            "workspace": self.workspace,
-            "token": self.token_for_orchestrator_registration
-        }
-        
-        self.orchestrator_hypha_server_connection = await connect_to_server(server_config_for_registration)
-        logger.info(f"Successfully connected to Hypha server: {self.orchestrator_hypha_server_url} for orchestrator registration")
+        logger.info(
+            f"Registering orchestrator as a Hypha service with ID '{self.orchestrator_hypha_service_id}' "
+            f"on cloud server '{self.orchestrator_hypha_server_url}' in workspace '{self.workspace}'"
+        )
+        if self.token_for_orchestrator_registration:
+            server_config_for_registration = {
+                "server_url": self.orchestrator_hypha_server_url,
+                "ping_interval": 30,
+                "workspace": self.workspace,
+                "token": self.token_for_orchestrator_registration,
+            }
 
-        service_api = {
-            "name": "Orchestrator Manager",
-            "id": self.orchestrator_hypha_service_id,
-            "config": {
-                "visibility": "protected",
-            },
-            "ping": self.ping,
-            "add_imaging_task": self.add_imaging_task,
-            "delete_imaging_task": self.delete_imaging_task,
-            "pause_imaging_task": self.pause_imaging_task,
-            "resume_imaging_task": self.resume_imaging_task,
-            "get_all_imaging_tasks": self.get_all_imaging_tasks,
-            "load_plate_from_incubator_to_microscope": self.load_plate_from_incubator_to_microscope_api,
-            "unload_plate_from_microscope": self.unload_plate_from_microscope_api,
-            "get_transport_queue_status": self.get_transport_queue_status,
-            "process_timelapse_offline": self.process_timelapse_offline_api,
-            "scan_microscope_only": self.scan_microscope_only_api,
-            "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
-        }
-        
-        registered_service = await self.orchestrator_hypha_server_connection.register_service(service_api)
-        logger.info(f"Orchestrator management service registered successfully. Service ID: {registered_service.id}")
+            self.orchestrator_hypha_server_connection = await connect_to_server(server_config_for_registration)
+            logger.info(
+                f"Successfully connected to Hypha server: {self.orchestrator_hypha_server_url} "
+                "for orchestrator registration"
+            )
+            registered_service = await self.orchestrator_hypha_server_connection.register_service(
+                self._build_service_api(),
+                overwrite=True,
+            )
+            logger.info(
+                "Orchestrator management service registered successfully on cloud Hypha. "
+                f"Service ID: {registered_service.id}"
+            )
+            registration_succeeded = True
+        else:
+            logger.warning(
+                "REEF_WORKSPACE_TOKEN is not set in environment. Skipping cloud orchestrator registration."
+            )
+
+        logger.info(
+            f"Registering orchestrator on local Hypha server '{self.server_url}' in workspace "
+            f"'{self.local_workspace or '<missing>'}'"
+        )
+        try:
+            local_connection = await self._ensure_local_server_connection()
+            if local_connection:
+                registered_service = await local_connection.register_service(
+                    self._build_service_api(),
+                    overwrite=True,
+                )
+                logger.info(
+                    "Orchestrator management service registered successfully on local Hypha. "
+                    f"Service ID: {registered_service.id}"
+                )
+                registration_succeeded = True
+        except Exception as exc:
+            logger.error(f"Failed to register orchestrator service on local Hypha: {exc}")
+
+        if not registration_succeeded:
+            logger.warning("Orchestrator service was not registered on any Hypha endpoint.")
 
     @schema_function(skip_self=True)
     async def ping(self):
@@ -1954,6 +2000,160 @@ class OrchestrationSystem:
         except Exception as e:
             logger.error(f"Failed to get transport queue status: {e}", exc_info=True)
             return {"error": str(e), "success": False}
+
+    @schema_function(skip_self=True)
+    async def get_runtime_status(self):
+        """Return a runtime snapshot for operator preflight checks and failure triage."""
+        try:
+            if not self.configured_microscopes_info and not self.tasks:
+                await self._load_and_update_tasks()
+
+            expected_microscopes = list(self.configured_microscopes_info.keys())
+            local_services_ready = (
+                self.incubator is not None
+                and self.robotic_arm is not None
+                and all(microscope_id in self.microscope_services for microscope_id in expected_microscopes)
+            )
+            if expected_microscopes and not local_services_ready:
+                try:
+                    await self.setup_connections()
+                except Exception as setup_error:
+                    logger.warning(f"Could not refresh local service proxies while building runtime status: {setup_error}")
+
+            admission_snapshot = await self.admission_controller.snapshot()
+            connected_microscopes = sorted(self.microscope_services.keys())
+            sample_on_flags_per_microscope = {
+                mic_id: self.sample_on_microscope_flags.get(mic_id, False)
+                for mic_id in expected_microscopes
+            }
+            connected_services = {
+                "incubator": self.incubator is not None,
+                "robotic_arm": self.robotic_arm is not None,
+                "microscopes": {
+                    mic_id: mic_id in self.microscope_services
+                    for mic_id in expected_microscopes
+                },
+            }
+
+            return {
+                "success": True,
+                "active_task": self.active_task_name,
+                "active_tasks": sorted(self._active_task_names),
+                "active_operations": admission_snapshot["active_operations"],
+                "held_resources": admission_snapshot["held_resources"],
+                "connected_services": connected_services,
+                "connected_microscopes": connected_microscopes,
+                "configured_microscopes": expected_microscopes,
+                "critical_services": sorted(
+                    [
+                        {"service_type": service_type, "service_id": service_id}
+                        for service_type, service_id in self.critical_services
+                    ],
+                    key=lambda item: (item["service_type"], item["service_id"]),
+                ),
+                "in_critical_operation": self.in_critical_operation,
+                "sample_on_microscope_flags": sample_on_flags_per_microscope,
+                "local_hypha": {
+                    "server_url": self.server_url,
+                    "workspace": self.local_workspace,
+                    "connected": self.local_server_connection is not None,
+                },
+                "cloud_hypha": {
+                    "server_url": self.orchestrator_hypha_server_url,
+                    "workspace": self.workspace,
+                    "connected": self.orchestrator_hypha_server_connection is not None,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Failed to get runtime status: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
+    async def get_incubator_samples(self, slot: int = None, only_available: bool = False):
+        """Return incubator sample metadata for the lab smoke-test picker."""
+        try:
+            if not self.incubator:
+                setup_ok = await self.setup_connections()
+                if not setup_ok or not self.incubator:
+                    raise Exception("Incubator service is not available.")
+
+            sample_payload = await self.incubator.get_slot_information(slot)
+            if sample_payload is None:
+                sample_records = []
+            elif isinstance(sample_payload, list):
+                sample_records = sample_payload
+            else:
+                sample_records = [sample_payload]
+
+            normalized_samples = []
+            for sample in sample_records:
+                sample_name = (sample.get("name") or "").strip()
+                location = sample.get("location") or "unknown"
+                normalized = {
+                    "incubator_slot": sample.get("incubator_slot"),
+                    "name": sample_name,
+                    "status": sample.get("status") or "",
+                    "location": location,
+                    "well_plate_type": sample.get("well_plate_type") or "96",
+                    "date_to_incubator": sample.get("date_to_incubator") or "",
+                    "available": bool(sample_name and location == "incubator_slot"),
+                }
+                if only_available and not normalized["available"]:
+                    continue
+                normalized_samples.append(normalized)
+
+            normalized_samples.sort(key=lambda item: item["incubator_slot"])
+            return {
+                "success": True,
+                "requested_slot": slot,
+                "only_available": only_available,
+                "samples": normalized_samples,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get incubator samples: {e}", exc_info=True)
+            return {"success": False, "message": str(e), "samples": []}
+
+    @schema_function(skip_self=True)
+    async def cancel_microscope_scan(self, microscope_id: str):
+        """Operator emergency API to cancel a running microscope scan."""
+        if microscope_id not in self.configured_microscopes_info:
+            return {"success": False, "message": f"Unknown microscope ID '{microscope_id}'."}
+
+        try:
+            if microscope_id not in self.microscope_services:
+                await self.setup_connections()
+            microscope_service = self.microscope_services.get(microscope_id)
+            if not microscope_service:
+                raise Exception(f"Microscope service {microscope_id} is not available.")
+
+            result = await microscope_service.scan_cancel()
+            return {
+                "success": True,
+                "message": f"Cancel command sent to microscope {microscope_id}.",
+                "result": result,
+            }
+        except Exception as e:
+            logger.error(f"Failed to cancel scan on {microscope_id}: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
+    async def halt_robotic_arm(self):
+        """Operator emergency API to halt the robotic arm immediately."""
+        try:
+            if not self.robotic_arm:
+                setup_ok = await self.setup_connections()
+                if not setup_ok or not self.robotic_arm:
+                    raise Exception("Robotic arm service is not available.")
+
+            result = await self.robotic_arm.halt()
+            return {
+                "success": True,
+                "message": "Robotic arm halt command sent.",
+                "result": result,
+            }
+        except Exception as e:
+            logger.error(f"Failed to halt robotic arm: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
 
     @schema_function(skip_self=True)
     async def get_lab_video_stream_urls(self):

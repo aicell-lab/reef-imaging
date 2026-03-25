@@ -1,5 +1,6 @@
 [build-system]
 requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "reef-imaging"
@@ -15,9 +16,13 @@ dependencies = [
     "av==11.0.0",
     "aiortc==1.13.0",
 ]
+
 [project.optional-dependencies]
-all = [
-]
+all = []
+
+[project.scripts]
+reef-imaging = "reef_imaging.__main__:main"
+reef-hardware-smoke-test = "reef_imaging.hardware_smoke_test:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -25,8 +30,3 @@ include-package-data = true
 [tool.setuptools.packages.find]
 include = ["reef_imaging*"]
 exclude = ["tests*", "scripts*"]
-
-[options.entry_points]
-console_scripts = [
-    "reef-imaging = reef_imaging.__main__:main",
-]

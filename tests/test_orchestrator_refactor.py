@@ -124,3 +124,51 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["state"], "busy")
 
         await orchestrator.admission_controller.release(lease.operation_id)
+
+    async def test_get_incubator_samples_filters_by_location_and_name(self):
+        class FakeIncubator:
+            async def get_slot_information(self, slot=None):
+                return [
+                    {
+                        "incubator_slot": 1,
+                        "name": "sample-a",
+                        "status": "IN",
+                        "location": "incubator_slot",
+                        "well_plate_type": "384",
+                    },
+                    {
+                        "incubator_slot": 2,
+                        "name": "",
+                        "status": "IN",
+                        "location": "incubator_slot",
+                        "well_plate_type": "96",
+                    },
+                    {
+                        "incubator_slot": 3,
+                        "name": "sample-c",
+                        "status": "OUT",
+                        "location": "robotic_arm",
+                        "well_plate_type": "96",
+                    },
+                ]
+
+        orchestrator = orchestrator_module.OrchestrationSystem()
+        orchestrator.incubator = FakeIncubator()
+
+        response = await orchestrator.get_incubator_samples(only_available=True)
+
+        self.assertTrue(response["success"])
+        self.assertEqual(
+            response["samples"],
+            [
+                {
+                    "incubator_slot": 1,
+                    "name": "sample-a",
+                    "status": "IN",
+                    "location": "incubator_slot",
+                    "well_plate_type": "384",
+                    "date_to_incubator": "",
+                    "available": True,
+                }
+            ],
+        )
