@@ -201,6 +201,17 @@ python orchestrator.py --local  # Local development
 python orchestrator_simulation.py --local  # No hardware simulation
 ```
 
+### Critical Hardware Smoke Test
+```bash
+reef-hardware-smoke-test
+```
+
+- This is a real hardware verification workflow, not a background diagnostic.
+- It exercises incubator access, robotic arm transport, and a short scan on each configured microscope.
+- A responsible person MUST remain physically on site in the lab for the entire run.
+- The script is intended for post-integration checks, post-maintenance checks, and safety validation after orchestration changes.
+- It stops on the first failure and offers emergency actions to cancel a scan or halt the robot.
+
 ### Start Hardware Services
 ```bash
 # Incubator
@@ -287,6 +298,7 @@ os.replace('config.json.tmp', 'config.json')
 - GitHub Actions workflow runs every 9 minutes (`.github/workflows/service_check.yml`)
 - Orchestrator performs health checks every 30 seconds
 - Camera watchdogs restart services if health checks fail
+- Real hardware smoke tests are manual and operator-attended; they must not be treated as unattended automation
 
 ### Log Files
 | Log File | Service |

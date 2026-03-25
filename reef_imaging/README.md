@@ -15,7 +15,7 @@ The main orchestration engine that coordinates all hardware and manages time-lap
 **Key Features**:
 - Task loading and scheduling from `config.json`
 - Service proxy management (microscope, robotic arm, incubator)
-- Transport queue for serialized load/unload operations
+- Admission-controlled busy rejection for conflicting transport and scan operations
 - Health monitoring with automatic reconnection (30-second intervals)
 - Critical operation protection to prevent mid-operation shutdowns
 - Atomic config writes (`config.json.tmp` → `config.json`) to prevent corruption
@@ -27,7 +27,10 @@ The main orchestration engine that coordinates all hardware and manages time-lap
 - `delete_imaging_task(task_name)` — remove a task
 - `pause_imaging_task(task_name)` / `resume_imaging_task(task_name)` — pause/resume scheduling
 - `get_all_imaging_tasks()` — list all tasks from `config.json`
-- `get_transport_queue_status()` — queue depth and worker state
+- `get_transport_queue_status()` — current busy/admission state for transport operations
+- `get_runtime_status()` — active operations, held resources, connected devices, critical services
+- `get_incubator_samples()` — slot metadata for operator-side sample selection
+- `cancel_microscope_scan()` / `halt_robotic_arm()` — emergency operator controls
 - `get_lab_video_stream_urls()` — public Hypha URLs for all camera feeds
 - `process_timelapse_offline_api(experiment_id)` — offline stitch + upload
 - `scan_microscope_only_api(microscope_id, scan_config)` — scan without transport
@@ -186,6 +189,20 @@ python orchestrator.py --local
 ```bash
 python orchestrator_simulation.py --local
 ```
+
+### Critical Hardware Smoke Test
+
+The package now includes `reef-hardware-smoke-test`, a real lab verification CLI for incubator transport, robotic arm motion, and short microscope scans across all configured microscopes.
+
+This test is **critical** and MUST only be run when a responsible operator is **physically on site in the lab**. It is not an unattended CI-style check. The operator must be ready to stop the run if any unsafe motion or unexpected hardware state is observed.
+
+Run it only after the local hardware services and the orchestrator are already running:
+
+```bash
+reef-hardware-smoke-test
+```
+
+The tool connects to the running local orchestrator, lists available incubator samples, lets the user pick 1 to 5 samples, asks for confirmation before each cycle, stops on the first failure, and writes a timestamped report under `hardware_test_reports/`.
 
 ### Starting Hardware Services
 
