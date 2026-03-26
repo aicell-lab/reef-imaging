@@ -251,6 +251,8 @@ python orchestrator_simulation.py --local  # No hardware simulation
 reef-hardware-smoke-test
 ```
 
+**⚠️ Agent Note:** The hardware smoke test is an interactive CLI tool and cannot be run by AI agents. The user must execute this command manually in their terminal.
+
 - This is a real hardware verification workflow, not a background diagnostic.
 - It exercises incubator access, robotic arm transport, and a short scan on each configured microscope.
 - A responsible person MUST remain physically on site in the lab for the entire run.

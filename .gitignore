@@ -188,6 +188,9 @@ reef_imaging/demo-async-local.ipynb
 reef_imaging/imaging_workflow_status.json
 *_progress.txt
 
+# Hardware test reports
+hardware_test_reports/**/summary.json
+
 # Configuration files
 config_simulation.json
 config.json

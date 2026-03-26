@@ -53,8 +53,10 @@ ENV_FILE = dotenv.find_dotenv()
 if ENV_FILE:
     dotenv.load_dotenv(ENV_FILE)
 
-CONFIG_FILE_PATH = "config.json"
-CONFIG_FILE_PATH_TMP = "config.json.tmp"
+# Get the directory where this module is located
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE_PATH = os.path.join(MODULE_DIR, "config.json")
+CONFIG_FILE_PATH_TMP = os.path.join(MODULE_DIR, "config.json.tmp")
 CONFIG_READ_INTERVAL = 10 # Seconds to wait before re-reading config.json
 ORCHESTRATOR_LOOP_SLEEP = 5 # Seconds to sleep in main loop when no immediate task is due
 

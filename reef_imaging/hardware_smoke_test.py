@@ -6,8 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Sequence
 
+import dotenv
 from hypha_rpc import connect_to_server
 
+# Load environment variables from .env file
+dotenv.load_dotenv()
 
 DEFAULT_LOCAL_SERVER_URL = os.environ.get("REEF_LOCAL_SERVER_URL", "http://reef.dyn.scilifelab.se:9527")
 DEFAULT_REPORT_ROOT = Path(__file__).resolve().parent.parent / "hardware_test_reports"
