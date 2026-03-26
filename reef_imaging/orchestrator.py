@@ -216,6 +216,10 @@ class OrchestrationSystem:
             "process_timelapse_offline": self.process_timelapse_offline_api,
             "scan_microscope_only": self.scan_microscope_only_api,
             "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
+            "load_plate_from_incubator_to_hamilton": self.load_plate_from_incubator_to_hamilton_api,
+            "unload_plate_from_hamilton_to_incubator": self.unload_plate_from_hamilton_to_incubator_api,
+            "transport_plate_from_microscope_to_hamilton": self.transport_plate_from_microscope_to_hamilton_api,
+            "transport_plate_from_hamilton_to_microscope": self.transport_plate_from_hamilton_to_microscope_api,
         }
 
     async def _ensure_local_server_connection(self):
@@ -1057,6 +1061,471 @@ class OrchestrationSystem:
             return self._busy_response(message, busy_error)
         except Exception as e:
             logger.error(f"Unload operation failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def _execute_load_to_hamilton_operation(
+        self,
+        incubator_slot: int,
+        *,
+        manage_transport_resources: bool = True,
+    ):
+        """Execute the load operation: move sample from incubator to Hamilton."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-load-hamilton",
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "load_to_hamilton",
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_load_to_hamilton_operation(
+                    incubator_slot,
+                    manage_transport_resources=False,
+                )
+                return
+
+        # Verify sample is in incubator before loading
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Incubator reports sample location for slot {incubator_slot}: {actual_location}")
+            if actual_location != "incubator_slot":
+                logger.warning(f"Sample not in incubator slot {incubator_slot}, location: {actual_location}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
+
+        logger.info(f"Loading sample from incubator slot {incubator_slot} to Hamilton...")
+
+        # Mark critical operation
+        self.in_critical_operation = True
+        logger.info("CRITICAL OPERATION START: Robotic arm loading sample to Hamilton")
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
+
+        try:
+            # Start parallel operations: prepare incubator and move robot
+            await asyncio.gather(
+                self.incubator.get_sample_from_slot_to_transfer_station(incubator_slot),
+                self.robotic_arm.transport_to_incubator()
+            )
+
+            # Move sample with robotic arm: incubator -> Hamilton
+            await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
+            await self.robotic_arm.incubator_to_hamilton()
+
+            # Update sample location to Hamilton
+            await self.incubator.update_sample_location(incubator_slot, "hamilton")
+
+            logger.info("Sample loaded onto Hamilton.")
+
+        except Exception as e:
+            error_msg = f"Failed to load sample from slot {incubator_slot} to Hamilton: {e}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        finally:
+            self.in_critical_operation = False
+            logger.info("CRITICAL OPERATION END: Robotic arm load to Hamilton complete")
+            self._unmark_critical_services(critical_services)
+
+    async def _execute_unload_from_hamilton_operation(
+        self,
+        incubator_slot: int,
+        *,
+        manage_transport_resources: bool = True,
+    ):
+        """Execute the unload operation: move sample from Hamilton to incubator."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-unload-hamilton",
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "unload_from_hamilton",
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_unload_from_hamilton_operation(
+                    incubator_slot,
+                    manage_transport_resources=False,
+                )
+                return
+
+        # Verify sample is at Hamilton before unloading
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
+
+            if actual_location == "incubator_slot":
+                logger.info(f"Sample already in incubator slot {incubator_slot}, no unload needed")
+                return
+            elif actual_location != "hamilton":
+                logger.warning(f"Sample not at Hamilton, location: {actual_location}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
+
+        logger.info(f"Unloading sample from Hamilton to incubator slot {incubator_slot}...")
+
+        # Mark critical operation
+        self.in_critical_operation = True
+        logger.info("CRITICAL OPERATION START: Robotic arm unloading sample from Hamilton")
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
+
+        try:
+            # Move sample with robotic arm: Hamilton -> incubator
+            await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
+            await self.robotic_arm.hamilton_to_incubator()
+
+            # Put sample back to incubator slot
+            await self.incubator.put_sample_from_transfer_station_to_slot(incubator_slot)
+            await self.incubator.update_sample_location(incubator_slot, "incubator_slot")
+
+            logger.info("Sample unloaded from Hamilton to incubator.")
+
+        except Exception as e:
+            error_msg = f"Failed to unload sample from Hamilton to slot {incubator_slot}: {e}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        finally:
+            self.in_critical_operation = False
+            logger.info("CRITICAL OPERATION END: Robotic arm unload from Hamilton complete")
+            self._unmark_critical_services(critical_services)
+
+    async def load_plate_from_incubator_to_hamilton_api(self, incubator_slot: int):
+        """API endpoint to load a plate from incubator to Hamilton."""
+        logger.info(f"API call: load_plate_from_incubator_to_hamilton for slot {incubator_slot}")
+
+        try:
+            if not self.incubator or not self.robotic_arm:
+                setup_ok = await self.setup_connections()
+                if not setup_ok:
+                    raise Exception("Transport services are not ready.")
+
+            request = self._build_request(
+                "manual-load-hamilton",
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={"trigger": "api", "action": "load_to_hamilton"},
+            )
+
+            async with self.admission_controller.hold(request):
+                await self._execute_load_to_hamilton_operation(
+                    incubator_slot,
+                    manage_transport_resources=False,
+                )
+            return {"success": True, "message": f"Load task for slot {incubator_slot} to Hamilton completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Load request for slot {incubator_slot} to Hamilton rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
+        except Exception as e:
+            logger.error(f"Load operation to Hamilton failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def unload_plate_from_hamilton_to_incubator_api(self, incubator_slot: int):
+        """API endpoint to unload a plate from Hamilton to incubator."""
+        logger.info(f"API call: unload_plate_from_hamilton_to_incubator for slot {incubator_slot}")
+
+        try:
+            if not self.incubator or not self.robotic_arm:
+                setup_ok = await self.setup_connections()
+                if not setup_ok:
+                    raise Exception("Transport services are not ready.")
+
+            request = self._build_request(
+                "manual-unload-hamilton",
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={"trigger": "api", "action": "unload_from_hamilton"},
+            )
+
+            async with self.admission_controller.hold(request):
+                await self._execute_unload_from_hamilton_operation(
+                    incubator_slot,
+                    manage_transport_resources=False,
+                )
+            return {"success": True, "message": f"Unload task for slot {incubator_slot} from Hamilton completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Unload request for slot {incubator_slot} from Hamilton rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
+        except Exception as e:
+            logger.error(f"Unload operation from Hamilton failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def _execute_microscope_to_hamilton_operation(
+        self,
+        incubator_slot: int,
+        microscope_id_str: str,
+        *,
+        manage_transport_resources: bool = True,
+    ):
+        """Execute the transport operation: move sample from microscope to Hamilton."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-microscope-to-hamilton",
+                microscope_id=microscope_id_str,
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "microscope_to_hamilton",
+                    "microscope_id": microscope_id_str,
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_microscope_to_hamilton_operation(
+                    incubator_slot,
+                    microscope_id_str,
+                    manage_transport_resources=False,
+                )
+                return
+
+        target_microscope_service = self.microscope_services.get(microscope_id_str)
+        if not target_microscope_service:
+            raise Exception(f"Microscope service {microscope_id_str} is not connected.")
+
+        robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
+
+        # Verify sample is on the microscope
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
+
+            expected_microscope_location = f"microscope{robot_microscope_target_id}"
+            if actual_location != expected_microscope_location:
+                logger.warning(f"Sample not on microscope {microscope_id_str}, location: {actual_location}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
+
+        if not self.sample_on_microscope_flags.get(microscope_id_str, False):
+            logger.info(f"Sample plate not on microscope {microscope_id_str} according to flags")
+            return
+
+        logger.info(f"Transporting sample from microscope {microscope_id_str} to Hamilton (slot {incubator_slot})...")
+
+        # Mark critical operation
+        self.in_critical_operation = True
+        logger.info("CRITICAL OPERATION START: Robotic arm transporting sample from microscope to Hamilton")
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('microscope', microscope_id_str),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
+
+        try:
+            # Home microscope stage
+            await target_microscope_service.home_stage()
+
+            # Move sample with robotic arm: microscope -> Hamilton
+            await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
+            await self.robotic_arm.microscope_to_hamilton(robot_microscope_target_id)
+
+            # Return stage and update location
+            await asyncio.gather(
+                target_microscope_service.return_stage(),
+                self.incubator.update_sample_location(incubator_slot, "hamilton")
+            )
+
+            self.sample_on_microscope_flags[microscope_id_str] = False
+            logger.info("Sample transported from microscope to Hamilton.")
+
+        except Exception as e:
+            error_msg = f"Failed to transport sample from microscope {microscope_id_str} to Hamilton: {e}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        finally:
+            self.in_critical_operation = False
+            logger.info("CRITICAL OPERATION END: Robotic arm microscope to Hamilton complete")
+            self._unmark_critical_services(critical_services)
+
+    async def _execute_hamilton_to_microscope_operation(
+        self,
+        incubator_slot: int,
+        microscope_id_str: str,
+        *,
+        manage_transport_resources: bool = True,
+    ):
+        """Execute the transport operation: move sample from Hamilton to microscope."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-hamilton-to-microscope",
+                microscope_id=microscope_id_str,
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "hamilton_to_microscope",
+                    "microscope_id": microscope_id_str,
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_hamilton_to_microscope_operation(
+                    incubator_slot,
+                    microscope_id_str,
+                    manage_transport_resources=False,
+                )
+                return
+
+        target_microscope_service = self.microscope_services.get(microscope_id_str)
+        if not target_microscope_service:
+            raise Exception(f"Microscope service {microscope_id_str} is not connected.")
+
+        robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
+
+        # Verify sample is at Hamilton
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Incubator reports sample location for slot {incubator_slot}: {actual_location}")
+            if actual_location != "hamilton":
+                logger.warning(f"Sample not at Hamilton, location: {actual_location}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
+
+        if self.sample_on_microscope_flags.get(microscope_id_str, False):
+            logger.info(f"Sample plate already on microscope {microscope_id_str}. Skipping load.")
+            return
+
+        logger.info(f"Transporting sample from Hamilton to microscope {microscope_id_str} (slot {incubator_slot})...")
+
+        # Mark critical operation
+        self.in_critical_operation = True
+        logger.info("CRITICAL OPERATION START: Robotic arm transporting sample from Hamilton to microscope")
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('microscope', microscope_id_str),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
+
+        try:
+            # Prepare microscope and move robot in parallel
+            await asyncio.gather(
+                target_microscope_service.home_stage(),
+                self.robotic_arm.transport_to_incubator()
+            )
+
+            # Move sample with robotic arm: Hamilton -> microscope
+            await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
+            await self.robotic_arm.hamilton_to_microscope(robot_microscope_target_id)
+
+            # Return stage and update location
+            await asyncio.gather(
+                target_microscope_service.return_stage(),
+                self.incubator.update_sample_location(incubator_slot, f"microscope{robot_microscope_target_id}")
+            )
+
+            self.sample_on_microscope_flags[microscope_id_str] = True
+            logger.info("Sample transported from Hamilton to microscope.")
+
+        except Exception as e:
+            error_msg = f"Failed to transport sample from Hamilton to microscope {microscope_id_str}: {e}"
+            logger.error(error_msg)
+            self.sample_on_microscope_flags[microscope_id_str] = False
+            raise Exception(error_msg)
+        finally:
+            self.in_critical_operation = False
+            logger.info("CRITICAL OPERATION END: Robotic arm Hamilton to microscope complete")
+            self._unmark_critical_services(critical_services)
+
+    async def transport_plate_from_microscope_to_hamilton_api(self, incubator_slot: int, microscope_id: str):
+        """API endpoint to transport a plate from microscope to Hamilton."""
+        logger.info(f"API call: transport_plate_from_microscope_to_hamilton for slot {incubator_slot} from microscope {microscope_id}")
+
+        if microscope_id not in self.configured_microscopes_info:
+            msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
+            logger.error(msg)
+            return {"success": False, "message": msg}
+
+        try:
+            if not self.incubator or not self.robotic_arm or microscope_id not in self.microscope_services:
+                setup_ok = await self.setup_connections()
+                if not setup_ok or microscope_id not in self.microscope_services:
+                    raise Exception(f"Transport services are not ready for microscope {microscope_id}.")
+
+            request = self._build_request(
+                "manual-microscope-to-hamilton",
+                microscope_id=microscope_id,
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={"trigger": "api", "action": "microscope_to_hamilton"},
+            )
+
+            async with self.admission_controller.hold(request):
+                await self._execute_microscope_to_hamilton_operation(
+                    incubator_slot,
+                    microscope_id,
+                    manage_transport_resources=False,
+                )
+            return {"success": True, "message": f"Transport from microscope {microscope_id} to Hamilton completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Transport request from microscope {microscope_id} to Hamilton rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
+        except Exception as e:
+            logger.error(f"Transport from microscope to Hamilton failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def transport_plate_from_hamilton_to_microscope_api(self, incubator_slot: int, microscope_id: str):
+        """API endpoint to transport a plate from Hamilton to microscope."""
+        logger.info(f"API call: transport_plate_from_hamilton_to_microscope for slot {incubator_slot} to microscope {microscope_id}")
+
+        if microscope_id not in self.configured_microscopes_info:
+            msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
+            logger.error(msg)
+            return {"success": False, "message": msg}
+
+        try:
+            if not self.incubator or not self.robotic_arm or microscope_id not in self.microscope_services:
+                setup_ok = await self.setup_connections()
+                if not setup_ok or microscope_id not in self.microscope_services:
+                    raise Exception(f"Transport services are not ready for microscope {microscope_id}.")
+
+            request = self._build_request(
+                "manual-hamilton-to-microscope",
+                microscope_id=microscope_id,
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={"trigger": "api", "action": "hamilton_to_microscope"},
+            )
+
+            async with self.admission_controller.hold(request):
+                await self._execute_hamilton_to_microscope_operation(
+                    incubator_slot,
+                    microscope_id,
+                    manage_transport_resources=False,
+                )
+            return {"success": True, "message": f"Transport from Hamilton to microscope {microscope_id} completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Transport request from Hamilton to microscope {microscope_id} rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
+        except Exception as e:
+            logger.error(f"Transport from Hamilton to microscope failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     async def _execute_unload_operation(

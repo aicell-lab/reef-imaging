@@ -31,6 +31,14 @@ class SmokeCycle:
     microscope_id: str
 
 
+@dataclass(frozen=True)
+class HamiltonCycle:
+    incubator_slot: int
+    sample_name: str
+    cycle_type: str  # 'incubator_to_hamilton', 'hamilton_to_incubator', 'microscope_to_hamilton', 'hamilton_to_microscope'
+    microscope_id: str = None  # Only used for microscope-related cycles
+
+
 def parse_slot_selection(raw_selection: str, available_slots: Iterable[int]) -> List[int]:
     available_slot_set = set(available_slots)
     tokens = [token.strip() for token in raw_selection.split(",") if token.strip()]
@@ -69,6 +77,70 @@ def build_cycle_plan(selected_samples: Sequence[dict], microscopes: Sequence[str
                     microscope_id=microscope_id,
                 )
             )
+    return cycles
+
+
+def build_hamilton_cycle_plan(selected_samples: Sequence[dict], test_type: str, microscopes: Sequence[str] = None) -> List[HamiltonCycle]:
+    """Build Hamilton test cycles based on test type.
+    
+    test_type: 'incubator_only' - test incubator <-> Hamilton
+               'microscope_only' - test microscope <-> Hamilton (uses first microscope)
+               'full' - test incubator -> Hamilton -> microscope -> Hamilton -> incubator
+    """
+    cycles = []
+    for sample in selected_samples:
+        if test_type == "incubator_only":
+            # Test incubator <-> Hamilton round trip
+            cycles.append(HamiltonCycle(
+                incubator_slot=sample["incubator_slot"],
+                sample_name=sample["name"],
+                cycle_type="incubator_to_hamilton"
+            ))
+            cycles.append(HamiltonCycle(
+                incubator_slot=sample["incubator_slot"],
+                sample_name=sample["name"],
+                cycle_type="hamilton_to_incubator"
+            ))
+        elif test_type == "microscope_only" and microscopes:
+            # Test microscope <-> Hamilton (use first microscope)
+            microscope_id = microscopes[0]
+            cycles.append(HamiltonCycle(
+                incubator_slot=sample["incubator_slot"],
+                sample_name=sample["name"],
+                cycle_type="hamilton_to_microscope",
+                microscope_id=microscope_id
+            ))
+            cycles.append(HamiltonCycle(
+                incubator_slot=sample["incubator_slot"],
+                sample_name=sample["name"],
+                cycle_type="microscope_to_hamilton",
+                microscope_id=microscope_id
+            ))
+        elif test_type == "full" and microscopes:
+            # Full cycle: incubator -> Hamilton -> microscope -> Hamilton -> incubator
+            microscope_id = microscopes[0]
+            cycles.append(HamiltonCycle(
+                incubator_slot=sample["incubator_slot"],
+                sample_name=sample["name"],
+                cycle_type="incubator_to_hamilton"
+            ))
+            cycles.append(HamiltonCycle(
+                incubator_slot=sample["incubator_slot"],
+                sample_name=sample["name"],
+                cycle_type="hamilton_to_microscope",
+                microscope_id=microscope_id
+            ))
+            cycles.append(HamiltonCycle(
+                incubator_slot=sample["incubator_slot"],
+                sample_name=sample["name"],
+                cycle_type="microscope_to_hamilton",
+                microscope_id=microscope_id
+            ))
+            cycles.append(HamiltonCycle(
+                incubator_slot=sample["incubator_slot"],
+                sample_name=sample["name"],
+                cycle_type="hamilton_to_incubator"
+            ))
     return cycles
 
 
@@ -144,6 +216,29 @@ class HardwareSmokeTestRunner:
         response = self.input_fn(f"{prompt} [y/N]: ").strip().lower()
         return response in {"y", "yes"}
 
+    def _prompt_for_test_mode(self) -> str:
+        """Ask user to select test mode."""
+        self._record("Select test mode:")
+        self._record("  1. Microscope only (default) - test incubator <-> microscope transport and scanning")
+        self._record("  2. Hamilton only (incubator) - test incubator <-> Hamilton transport")
+        self._record("  3. Hamilton only (microscope) - test microscope <-> Hamilton transport")
+        self._record("  4. Hamilton full cycle - test incubator -> Hamilton -> microscope -> Hamilton -> incubator")
+        self._record("  5. Combined - test microscope first, then Hamilton")
+        while True:
+            response = self.input_fn("Enter choice [1-5, default=1]: ").strip()
+            if response in {"", "1"}:
+                return "microscope_only"
+            elif response == "2":
+                return "hamilton_incubator"
+            elif response == "3":
+                return "hamilton_microscope"
+            elif response == "4":
+                return "hamilton_full"
+            elif response == "5":
+                return "combined"
+            else:
+                self._record("Invalid choice. Please enter 1-5.")
+
     def _prompt_for_slots(self, available_slots: Sequence[int]) -> List[int]:
         while True:
             response = self.input_fn(
@@ -217,7 +312,7 @@ class HardwareSmokeTestRunner:
             )
         return sample
 
-    async def _offer_emergency_actions(self, cycle: SmokeCycle) -> List[dict]:
+    async def _offer_emergency_actions(self, cycle: SmokeCycle = None, hamilton_cycle: HamiltonCycle = None) -> List[dict]:
         actions_taken = []
         while True:
             choice = self.input_fn(
@@ -226,7 +321,12 @@ class HardwareSmokeTestRunner:
             if choice in {"", "skip"}:
                 return actions_taken
             if choice == "cancel-scan":
-                response = await self.orchestrator.cancel_microscope_scan(microscope_id=cycle.microscope_id)
+                microscope_id = cycle.microscope_id if cycle else (hamilton_cycle.microscope_id if hamilton_cycle else None)
+                if microscope_id:
+                    response = await self.orchestrator.cancel_microscope_scan(microscope_id=microscope_id)
+                else:
+                    self._record("Cannot cancel scan: no microscope specified.")
+                    continue
             elif choice == "halt-robot":
                 response = await self.orchestrator.halt_robotic_arm()
             else:
@@ -285,6 +385,127 @@ class HardwareSmokeTestRunner:
             cycle_result["runtime_status"] = await self._safe_runtime_status()
             return cycle_result
 
+    async def _verify_sample_at_hamilton(self, cycle: HamiltonCycle) -> dict:
+        response = await self.orchestrator.get_incubator_samples(slot=cycle.incubator_slot)
+        if not response.get("success", True):
+            raise RuntimeError(response.get("message", "Failed to verify sample location."))
+        samples = response.get("samples", [])
+        if len(samples) != 1:
+            raise RuntimeError(f"Expected one sample record for slot {cycle.incubator_slot}, got {len(samples)}.")
+        sample = samples[0]
+        if sample.get("location") != "hamilton":
+            raise RuntimeError(
+                f"Sample in slot {cycle.incubator_slot} is at '{sample.get('location')}', not 'hamilton'."
+            )
+        return sample
+
+    async def _run_hamilton_cycle(self, cycle: HamiltonCycle) -> dict:
+        action_id = f"hardware_smoke_{self.run_id}_slot{cycle.incubator_slot}_{cycle.cycle_type}"
+        cycle_result = {
+            "cycle": asdict(cycle),
+            "action_id": action_id,
+            "status": "running",
+            "last_completed_step": None,
+        }
+
+        try:
+            if cycle.cycle_type == "incubator_to_hamilton":
+                response = await self.orchestrator.load_plate_from_incubator_to_hamilton(
+                    incubator_slot=cycle.incubator_slot,
+                )
+                cycle_result["transport_response"] = response
+                if not response.get("success"):
+                    raise RuntimeError(response.get("message", "Load to Hamilton failed."))
+                verification = await self._verify_sample_at_hamilton(cycle)
+                cycle_result["verification"] = verification
+                cycle_result["last_completed_step"] = "incubator_to_hamilton"
+
+            elif cycle.cycle_type == "hamilton_to_incubator":
+                response = await self.orchestrator.unload_plate_from_hamilton_to_incubator(
+                    incubator_slot=cycle.incubator_slot,
+                )
+                cycle_result["transport_response"] = response
+                if not response.get("success"):
+                    raise RuntimeError(response.get("message", "Unload from Hamilton failed."))
+                verification = await self._verify_sample_returned(cycle)
+                cycle_result["verification"] = verification
+                cycle_result["last_completed_step"] = "hamilton_to_incubator"
+
+            elif cycle.cycle_type == "microscope_to_hamilton":
+                response = await self.orchestrator.transport_plate_from_microscope_to_hamilton(
+                    incubator_slot=cycle.incubator_slot,
+                    microscope_id=cycle.microscope_id,
+                )
+                cycle_result["transport_response"] = response
+                if not response.get("success"):
+                    raise RuntimeError(response.get("message", "Transport from microscope to Hamilton failed."))
+                verification = await self._verify_sample_at_hamilton(cycle)
+                cycle_result["verification"] = verification
+                cycle_result["last_completed_step"] = "microscope_to_hamilton"
+
+            elif cycle.cycle_type == "hamilton_to_microscope":
+                response = await self.orchestrator.transport_plate_from_hamilton_to_microscope(
+                    incubator_slot=cycle.incubator_slot,
+                    microscope_id=cycle.microscope_id,
+                )
+                cycle_result["transport_response"] = response
+                if not response.get("success"):
+                    raise RuntimeError(response.get("message", "Transport from Hamilton to microscope failed."))
+                # For hamilton_to_microscope, verify sample is on microscope via runtime status
+                runtime_status = await self._get_runtime_status()
+                sample_flags = runtime_status.get("sample_on_microscope_flags", {})
+                if not sample_flags.get(cycle.microscope_id, False):
+                    raise RuntimeError(f"Sample not detected on microscope {cycle.microscope_id} after transport.")
+                cycle_result["last_completed_step"] = "hamilton_to_microscope"
+
+            cycle_result["status"] = "completed"
+            return cycle_result
+        except Exception as exc:
+            cycle_result["status"] = "failed"
+            cycle_result["error"] = str(exc)
+            cycle_result["runtime_status"] = await self._safe_runtime_status()
+            return cycle_result
+
+    async def _run_hamilton_cycles(self, cycles: List[HamiltonCycle], summary: dict) -> dict:
+        """Run Hamilton test cycles."""
+        for index, cycle in enumerate(cycles, start=1):
+            microscope_info = f" -> {cycle.microscope_id}" if cycle.microscope_id else ""
+            if not self._confirm(
+                f"Start Hamilton cycle {index}/{len(cycles)}: {cycle.cycle_type} "
+                f"for slot {cycle.incubator_slot} ({cycle.sample_name}){microscope_info}"
+            ):
+                raise OperatorAbortError(
+                    f"Operator stopped before Hamilton cycle {index} for slot {cycle.incubator_slot}."
+                )
+
+            self._record(
+                f"Starting Hamilton cycle {index}/{len(cycles)}: {cycle.cycle_type}, "
+                f"slot {cycle.incubator_slot}, sample '{cycle.sample_name}'{microscope_info}"
+            )
+            cycle_result = await self._run_hamilton_cycle(cycle)
+            summary["cycles"].append(cycle_result)
+            self._write_summary(summary)
+
+            if cycle_result["status"] != "completed":
+                self._record(
+                    "Hamilton cycle failed. "
+                    f"slot={cycle.incubator_slot}, type={cycle.cycle_type}, "
+                    f"action_id={cycle_result['action_id']}, "
+                    f"last_completed_step={cycle_result.get('last_completed_step')}, "
+                    f"error={cycle_result.get('error')}"
+                )
+                cycle_result["emergency_actions"] = await self._offer_emergency_actions(hamilton_cycle=cycle)
+                summary["status"] = "failed"
+                summary["failure"] = cycle_result
+                self._write_summary(summary)
+                return summary
+
+            self._record(
+                f"Hamilton cycle completed successfully: {cycle.cycle_type}, slot {cycle.incubator_slot}, "
+                f"action_id={cycle_result['action_id']}"
+            )
+        return summary
+
     def _write_summary(self, summary: dict) -> None:
         self.summary_path.parent.mkdir(parents=True, exist_ok=True)
         with self.summary_path.open("w", encoding="utf-8") as handle:
@@ -308,16 +529,15 @@ class HardwareSmokeTestRunner:
             with self.log_path.open("a", encoding="utf-8") as handle:
                 handle.write(samples_table + "\n")
 
+            test_mode = self._prompt_for_test_mode()
+            summary["test_mode"] = test_mode
+
             selected_slots = self._prompt_for_slots([sample["incubator_slot"] for sample in available_samples])
             sample_by_slot = {sample["incubator_slot"]: sample for sample in available_samples}
             selected_samples = [sample_by_slot[slot] for slot in selected_slots]
-            cycles = build_cycle_plan(selected_samples, microscopes)
 
             self._record(f"Selected incubator slots: {selected_slots}")
-            self._record(f"Target microscopes: {microscopes}")
-            self._record(
-                f"Planned cycles: {len(cycles)} ({len(selected_samples)} sample(s) x {len(microscopes)} microscope(s))"
-            )
+            self._record(f"Test mode: {test_mode}")
 
             if not self._confirm("Confirm you are in the lab and the robot/microscope motion path is clear"):
                 raise OperatorAbortError("Operator did not acknowledge lab safety preconditions.")
@@ -326,41 +546,113 @@ class HardwareSmokeTestRunner:
             summary["configured_microscopes"] = microscopes
             summary["preflight_runtime_status"] = runtime_status
 
-            for index, cycle in enumerate(cycles, start=1):
-                if not self._confirm(
-                    f"Start cycle {index}/{len(cycles)} for slot {cycle.incubator_slot} "
-                    f"({cycle.sample_name}) on {cycle.microscope_id}"
-                ):
-                    raise OperatorAbortError(
-                        f"Operator stopped before cycle {index} for slot {cycle.incubator_slot} on {cycle.microscope_id}."
-                    )
-
+            if test_mode == "microscope_only":
+                cycles = build_cycle_plan(selected_samples, microscopes)
+                self._record(f"Target microscopes: {microscopes}")
                 self._record(
-                    f"Starting cycle {index}/{len(cycles)}: slot {cycle.incubator_slot}, "
-                    f"sample '{cycle.sample_name}', microscope {cycle.microscope_id}"
+                    f"Planned cycles: {len(cycles)} ({len(selected_samples)} sample(s) x {len(microscopes)} microscope(s))"
                 )
-                cycle_result = await self._run_cycle(cycle)
-                summary["cycles"].append(cycle_result)
-                self._write_summary(summary)
 
-                if cycle_result["status"] != "completed":
+                for index, cycle in enumerate(cycles, start=1):
+                    if not self._confirm(
+                        f"Start cycle {index}/{len(cycles)} for slot {cycle.incubator_slot} "
+                        f"({cycle.sample_name}) on {cycle.microscope_id}"
+                    ):
+                        raise OperatorAbortError(
+                            f"Operator stopped before cycle {index} for slot {cycle.incubator_slot} on {cycle.microscope_id}."
+                        )
+
                     self._record(
-                        "Cycle failed. "
-                        f"slot={cycle.incubator_slot}, microscope={cycle.microscope_id}, "
-                        f"action_id={cycle_result['action_id']}, "
-                        f"last_completed_step={cycle_result.get('last_completed_step')}, "
-                        f"error={cycle_result.get('error')}"
+                        f"Starting cycle {index}/{len(cycles)}: slot {cycle.incubator_slot}, "
+                        f"sample '{cycle.sample_name}', microscope {cycle.microscope_id}"
                     )
-                    cycle_result["emergency_actions"] = await self._offer_emergency_actions(cycle)
-                    summary["status"] = "failed"
-                    summary["failure"] = cycle_result
+                    cycle_result = await self._run_cycle(cycle)
+                    summary["cycles"].append(cycle_result)
                     self._write_summary(summary)
+
+                    if cycle_result["status"] != "completed":
+                        self._record(
+                            "Cycle failed. "
+                            f"slot={cycle.incubator_slot}, microscope={cycle.microscope_id}, "
+                            f"action_id={cycle_result['action_id']}, "
+                            f"last_completed_step={cycle_result.get('last_completed_step')}, "
+                            f"error={cycle_result.get('error')}"
+                        )
+                        cycle_result["emergency_actions"] = await self._offer_emergency_actions(cycle=cycle)
+                        summary["status"] = "failed"
+                        summary["failure"] = cycle_result
+                        self._write_summary(summary)
+                        return summary
+
+                    self._record(
+                        f"Cycle completed successfully: slot {cycle.incubator_slot}, microscope {cycle.microscope_id}, "
+                        f"action_id={cycle_result['action_id']}"
+                    )
+
+            elif test_mode in ("hamilton_incubator", "hamilton_microscope", "hamilton_full"):
+                hamilton_test_type = {
+                    "hamilton_incubator": "incubator_only",
+                    "hamilton_microscope": "microscope_only",
+                    "hamilton_full": "full"
+                }[test_mode]
+                hamilton_cycles = build_hamilton_cycle_plan(selected_samples, hamilton_test_type, microscopes)
+                self._record(f"Planned Hamilton cycles: {len(hamilton_cycles)}")
+
+                summary = await self._run_hamilton_cycles(hamilton_cycles, summary)
+                if summary.get("status") == "failed":
                     return summary
 
+            elif test_mode == "combined":
+                # First run microscope tests
+                cycles = build_cycle_plan(selected_samples, microscopes)
+                self._record(f"Target microscopes: {microscopes}")
                 self._record(
-                    f"Cycle completed successfully: slot {cycle.incubator_slot}, microscope {cycle.microscope_id}, "
-                    f"action_id={cycle_result['action_id']}"
+                    f"Planned microscope cycles: {len(cycles)} ({len(selected_samples)} sample(s) x {len(microscopes)} microscope(s))"
                 )
+
+                for index, cycle in enumerate(cycles, start=1):
+                    if not self._confirm(
+                        f"Start cycle {index}/{len(cycles)} for slot {cycle.incubator_slot} "
+                        f"({cycle.sample_name}) on {cycle.microscope_id}"
+                    ):
+                        raise OperatorAbortError(
+                            f"Operator stopped before cycle {index} for slot {cycle.incubator_slot} on {cycle.microscope_id}."
+                        )
+
+                    self._record(
+                        f"Starting cycle {index}/{len(cycles)}: slot {cycle.incubator_slot}, "
+                        f"sample '{cycle.sample_name}', microscope {cycle.microscope_id}"
+                    )
+                    cycle_result = await self._run_cycle(cycle)
+                    summary["cycles"].append(cycle_result)
+                    self._write_summary(summary)
+
+                    if cycle_result["status"] != "completed":
+                        self._record(
+                            "Cycle failed. "
+                            f"slot={cycle.incubator_slot}, microscope={cycle.microscope_id}, "
+                            f"action_id={cycle_result['action_id']}, "
+                            f"last_completed_step={cycle_result.get('last_completed_step')}, "
+                            f"error={cycle_result.get('error')}"
+                        )
+                        cycle_result["emergency_actions"] = await self._offer_emergency_actions(cycle=cycle)
+                        summary["status"] = "failed"
+                        summary["failure"] = cycle_result
+                        self._write_summary(summary)
+                        return summary
+
+                    self._record(
+                        f"Cycle completed successfully: slot {cycle.incubator_slot}, microscope {cycle.microscope_id}, "
+                        f"action_id={cycle_result['action_id']}"
+                    )
+
+                # Then run Hamilton full cycle
+                if self._confirm("Microscope tests completed. Continue with Hamilton full cycle test?"):
+                    hamilton_cycles = build_hamilton_cycle_plan(selected_samples, "full", microscopes)
+                    self._record(f"Planned Hamilton cycles: {len(hamilton_cycles)}")
+                    summary = await self._run_hamilton_cycles(hamilton_cycles, summary)
+                    if summary.get("status") == "failed":
+                        return summary
 
             summary["status"] = "completed"
             return summary
