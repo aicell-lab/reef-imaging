@@ -1154,7 +1154,7 @@ class OrchestrationSystem:
 
         This method continuously polls the microscope service every 10 seconds to check
         the scan progress. It handles WebSocket interruptions gracefully by retrying
-        failed status checks.
+        failed status checks. Also monitors busy_status for enhanced state tracking.
 
         Args:
             microscope_service: The microscope service proxy to poll
@@ -1184,6 +1184,7 @@ class OrchestrationSystem:
                 
                 # Extract status information
                 status = status_response.get("state", "unknown")
+                busy_status = status_response.get("busy_status", "unknown")
                 
                 # Log full response for debugging when status is unknown
                 if status == "unknown":
@@ -1201,6 +1202,9 @@ class OrchestrationSystem:
                     raise Exception(error_msg)
                 
                 elif status == "running":
+                    # Log busy_status if available for enhanced debugging
+                    if busy_status != "unknown":
+                        logger.debug(f"Scan running - busy_status: {busy_status}")
                     # Continue polling
                     await asyncio.sleep(poll_interval)
                 
@@ -2115,7 +2119,12 @@ class OrchestrationSystem:
 
     @schema_function(skip_self=True)
     async def cancel_microscope_scan(self, microscope_id: str):
-        """Operator emergency API to cancel a running microscope scan."""
+        """Operator emergency API to cancel a running microscope scan.
+        
+        Note: scan_cancel() performs async cancellation. The scan may continue briefly
+        in the background before stopping. The result message indicates whether the
+        scan was stopped immediately or is stopping gracefully.
+        """
         if microscope_id not in self.configured_microscopes_info:
             return {"success": False, "message": f"Unknown microscope ID '{microscope_id}'."}
 
@@ -2127,10 +2136,23 @@ class OrchestrationSystem:
                 raise Exception(f"Microscope service {microscope_id} is not available.")
 
             result = await microscope_service.scan_cancel()
+            
+            # Handle new async cancellation behavior
+            # scan_cancel() may return a message indicating the scan is stopping in background
+            result_msg = result.get("message", "") if isinstance(result, dict) else str(result)
+            is_async_cancel = "stopping in the background" in result_msg.lower()
+            
+            if is_async_cancel:
+                logger.info(f"Scan on {microscope_id} is stopping in the background. "
+                           f"Result: {result_msg}")
+            else:
+                logger.info(f"Scan cancelled on {microscope_id}: {result_msg}")
+            
             return {
                 "success": True,
                 "message": f"Cancel command sent to microscope {microscope_id}.",
                 "result": result,
+                "async_cancellation": is_async_cancel,
             }
         except Exception as e:
             logger.error(f"Failed to cancel scan on {microscope_id}: {e}", exc_info=True)

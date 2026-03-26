@@ -179,6 +179,51 @@ await server.serve()  # blocks
 | RealSense | `reef-realsense-feed` | reef-server |
 | Hamilton Cam | `reef-hamilton-feed` | Hamilton Windows PC |
 
+### Microscope Busy-State Management
+
+The microscope service implements centralized busy guards to prevent conflicting operations. The service tracks active operations by scope (`hardware`, `processing`) and rejects conflicting calls.
+
+**New RPC Methods:**
+- `get_busy_status()` - Returns the current busy state without full status
+  ```python
+  {
+      "busy_status": "idle",  # or "hardware", "processing", "both"
+      "hardware_busy": False,
+      "processing_busy": False
+  }
+  ```
+
+**Enhanced Methods:**
+- `get_status()` now includes:
+  ```python
+  {
+      # ... existing fields ...
+      "busy_status": "idle",      # "idle", "hardware", "processing", "both"
+      "hardware_busy": False,
+      "processing_busy": False
+  }
+  ```
+- `scan_get_status()` now includes:
+  ```python
+  {
+      "success": True,
+      "state": "running",         # "idle", "running", "completed", "failed"
+      "busy_status": "processing", # Current busy state during scan
+      "error_message": None,
+      "saved_data_type": "raw_images_well_plate"
+  }
+  ```
+
+**Error Handling:**
+Conflicting operations now fail with `MicroscopeBusyError` whose message starts with `MICROSCOPE_BUSY`. Clients should check for this prefix to handle busy states appropriately.
+
+**Scan Cancellation Behavior Change:**
+`scan_cancel()` no longer force-cancels the asyncio task immediately. Instead:
+1. Returns `"Scan cancellation requested; scan is stopping in the background"`
+2. The scan continues running in the background until it actually exits
+3. Clients should poll `scan_get_status()` to confirm the scan has stopped
+4. Do not assume cancel means immediate idle - the microscope may still be busy
+
 ## Running Services
 
 ### Start Infrastructure
