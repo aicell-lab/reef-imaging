@@ -6,26 +6,35 @@ Task:
 3. Unload the plate from microscope to incubator
 """
 import asyncio
-import time
-import base64
-from IPython.display import Image, display
-from hypha_rpc import connect_to_server, login
+from hypha_rpc import connect_to_server
 from hypha_rpc.utils.schema import schema_function
 import os
 import dotenv
 import logging
 import sys
 import logging.handlers
-from datetime import datetime, timezone, timedelta
-import argparse
+from datetime import datetime
 import json
 import copy
+from uuid import uuid4
+
+from reef_imaging.orchestration import (
+    AdmissionRequest,
+    OperationAdmissionController,
+    ResourceBusyError,
+)
+
+logger = logging.getLogger(__name__)
 
 # Set up logging
 def setup_logging(log_file="orchestrator.log", max_bytes=10*1024*1024, backup_count=5):
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    if logger.handlers:
+        return logger
 
     # Rotating file handler - this will automatically rotate between orchestrator.log, orchestrator.log.1, orchestrator.log.2, etc.
     file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
@@ -44,14 +53,18 @@ ENV_FILE = dotenv.find_dotenv()
 if ENV_FILE:
     dotenv.load_dotenv(ENV_FILE)
 
-CONFIG_FILE_PATH = "config.json"
-CONFIG_FILE_PATH_TMP = "config.json.tmp"
+# Get the directory where this module is located
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE_PATH = os.path.join(MODULE_DIR, "config.json")
+CONFIG_FILE_PATH_TMP = os.path.join(MODULE_DIR, "config.json.tmp")
 CONFIG_READ_INTERVAL = 10 # Seconds to wait before re-reading config.json
 ORCHESTRATOR_LOOP_SLEEP = 5 # Seconds to sleep in main loop when no immediate task is due
 
 class OrchestrationSystem:
     def __init__(self):
         self.server_url = "http://reef.dyn.scilifelab.se:9527"
+        self.local_workspace = os.environ.get("REEF_LOCAL_WORKSPACE")
+        self.local_token = os.environ.get("REEF_LOCAL_TOKEN")
         
         # Orchestrator's own Hypha service registration details
         self.orchestrator_hypha_server_url = "https://hypha.aicell.io"
@@ -75,18 +88,16 @@ class OrchestrationSystem:
 
         self.tasks = {} # Stores task configurations and states
         self.health_check_tasks = {} # Stores asyncio tasks for health checks, keyed by (service_type, service_id)
-        self.active_task_name = None # Name of the task currently being processed or None
+        self.active_task_name = None # Compatibility field; mirrors the first running task if any
+        self._active_task_names = set()
+        self._scheduled_cycle_tasks = {} # task_name -> asyncio.Task
         self._config_lock = asyncio.Lock()
+        self.admission_controller = OperationAdmissionController()
 
         # Critical operation tracking - True when robotic arm is moving or microscope is scanning
         self.in_critical_operation = False
         # Track exactly which services are in a critical section to avoid unrelated shutdowns
         self.critical_services = set()  # set of tuples: (service_type, service_identifier)
-
-        # Transport Queue and Worker Task
-        self.transport_queue = asyncio.Queue()
-        self._transport_worker_task = None # Will be created in _register_self_as_hypha_service
-        self._current_transport_operation = None  # Track current operation: {"action": str, "incubator_slot": int, "microscope_id": str}
 
     def _get_robot_microscope_id(self, microscope_id_str: str) -> int:
         """Map microscope service ID to robot arm target ID (1, 2, or 3)."""
@@ -116,23 +127,119 @@ class OrchestrationSystem:
             except Exception:
                 pass
 
-    async def _queue_transport_operation(self, action: str, incubator_slot: int, microscope_id: str):
-        """Queue a transport operation and wait for completion."""
-        loop = asyncio.get_running_loop()
-        op_future = loop.create_future()
-        try:
-            await self.transport_queue.put({
-                "action": action,
-                "incubator_slot": incubator_slot,
-                "microscope_id": microscope_id,
-                "future": op_future
+    def _refresh_legacy_active_task_name(self):
+        """Keep the legacy single-task field aligned with the running task set."""
+        self.active_task_name = sorted(self._active_task_names)[0] if self._active_task_names else None
+
+    def _mark_task_running(self, task_name: str):
+        self._active_task_names.add(task_name)
+        self._refresh_legacy_active_task_name()
+
+    def _mark_task_not_running(self, task_name: str):
+        self._active_task_names.discard(task_name)
+        self._refresh_legacy_active_task_name()
+
+    def _new_operation_id(self, operation_type: str) -> str:
+        return f"{operation_type}-{uuid4().hex[:12]}"
+
+    def _task_resource(self, task_name: str) -> str:
+        return f"task:{task_name}"
+
+    def _microscope_resource(self, microscope_id: str) -> str:
+        return f"microscope:{microscope_id}"
+
+    def _slot_resource(self, incubator_slot: int) -> str:
+        return f"incubator-slot:{incubator_slot}"
+
+    def _transport_resources(self) -> tuple[str, ...]:
+        return ("transport-lane", "robotic-arm", "incubator")
+
+    def _build_request(
+        self,
+        operation_type: str,
+        *,
+        task_name: str = None,
+        microscope_id: str = None,
+        incubator_slot: int = None,
+        extra_resources: tuple[str, ...] = (),
+        metadata: dict = None,
+    ) -> AdmissionRequest:
+        resources = []
+        if task_name:
+            resources.append(self._task_resource(task_name))
+        if microscope_id:
+            resources.append(self._microscope_resource(microscope_id))
+        if incubator_slot is not None:
+            resources.append(self._slot_resource(incubator_slot))
+        resources.extend(extra_resources)
+
+        unique_resources = tuple(dict.fromkeys(resources))
+        return AdmissionRequest(
+            operation_id=self._new_operation_id(operation_type),
+            operation_type=operation_type,
+            resources=unique_resources,
+            microscope_id=microscope_id,
+            incubator_slot=incubator_slot,
+            task_name=task_name,
+            metadata=metadata or {},
+        )
+
+    def _busy_response(self, message: str, busy_error: ResourceBusyError) -> dict:
+        response = {
+            "success": False,
+            "message": message,
+            "state": "busy",
+            "blocked_by": [blocker.to_dict() for blocker in busy_error.blockers],
+        }
+        return response
+
+    def _build_service_api(self) -> dict:
+        return {
+            "name": "Orchestrator Manager",
+            "id": self.orchestrator_hypha_service_id,
+            "config": {
+                "visibility": "protected",
+            },
+            "ping": self.ping,
+            "add_imaging_task": self.add_imaging_task,
+            "delete_imaging_task": self.delete_imaging_task,
+            "pause_imaging_task": self.pause_imaging_task,
+            "resume_imaging_task": self.resume_imaging_task,
+            "get_all_imaging_tasks": self.get_all_imaging_tasks,
+            "load_plate_from_incubator_to_microscope": self.load_plate_from_incubator_to_microscope_api,
+            "unload_plate_from_microscope": self.unload_plate_from_microscope_api,
+            "get_transport_queue_status": self.get_transport_queue_status,
+            "get_runtime_status": self.get_runtime_status,
+            "get_incubator_samples": self.get_incubator_samples,
+            "cancel_microscope_scan": self.cancel_microscope_scan,
+            "halt_robotic_arm": self.halt_robotic_arm,
+            "process_timelapse_offline": self.process_timelapse_offline_api,
+            "scan_microscope_only": self.scan_microscope_only_api,
+            "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
+            "load_plate_from_incubator_to_hamilton": self.load_plate_from_incubator_to_hamilton_api,
+            "unload_plate_from_hamilton_to_incubator": self.unload_plate_from_hamilton_to_incubator_api,
+            "transport_plate_from_microscope_to_hamilton": self.transport_plate_from_microscope_to_hamilton_api,
+            "transport_plate_from_hamilton_to_microscope": self.transport_plate_from_hamilton_to_microscope_api,
+        }
+
+    async def _ensure_local_server_connection(self):
+        if not self.local_token:
+            logger.error("REEF_LOCAL_TOKEN not set. Cannot setup local connection.")
+            return None
+        if not self.local_workspace:
+            logger.error("REEF_LOCAL_WORKSPACE not set. Cannot setup local connection.")
+            return None
+
+        if not self.local_server_connection:
+            logger.info(f"Creating stable connection to local Hypha server: {self.server_url}")
+            self.local_server_connection = await connect_to_server({
+                "server_url": self.server_url,
+                "token": self.local_token,
+                "workspace": self.local_workspace,
+                "ping_interval": 30,
             })
-            await op_future
-        except Exception as e:
-            logger.error(f"Error in transport operation {action}: {e}", exc_info=True)
-            if not op_future.done():
-                op_future.cancel()
-            raise
+            logger.info("Stable server connection established.")
+        return self.local_server_connection
 
     async def _start_health_check(self, service_type, service_instance, service_identifier=None): # MODIFIED signature
         key = (service_type, service_identifier) if service_identifier else service_type
@@ -159,22 +266,21 @@ class OrchestrationSystem:
 
     async def _load_and_update_tasks(self):
         new_task_configs = {}
-        raw_config_data = None 
+        raw_settings_by_task = {}
+        raw_config_data = None
 
         async with self._config_lock:
             try:
                 with open(CONFIG_FILE_PATH, 'r') as f:
-                    raw_config_data = json.load(f) 
+                    raw_config_data = json.load(f)
             except FileNotFoundError:
                 logger.error(f"Configuration file {CONFIG_FILE_PATH} not found.")
-                raw_config_data = {"samples": []} 
+                raw_config_data = {"samples": []}
             except (json.JSONDecodeError, OSError) as e:
                 logger.error(f"Error reading {CONFIG_FILE_PATH}: {e}. Will not update tasks from file this cycle.")
                 # Add a small delay to prevent rapid retries on file system errors
                 await asyncio.sleep(1)
-                return 
-
-        current_time_naive = datetime.now() # Used for intelligent flag setting, not scheduling here
+                return
 
         for sample_config_from_file in raw_config_data.get("samples", []):
             task_name = sample_config_from_file.get("name")
@@ -202,8 +308,10 @@ class OrchestrationSystem:
                 has_imaged = bool(imaged_datetimes)
 
                 # These flags in settings are for what's WRITTEN to config, orchestrator uses internal datetime lists primarily.
-                settings["imaging_completed"] = not has_pending
-                settings["imaging_started"] = has_imaged or (not has_pending and has_imaged) # Started if imaged, or completed & imaged
+                normalized_settings = copy.deepcopy(settings)
+                normalized_settings["imaging_completed"] = not has_pending
+                normalized_settings["imaging_started"] = has_imaged or (not has_pending and has_imaged) # Started if imaged, or completed & imaged
+                raw_settings_by_task[task_name] = normalized_settings
 
                 scan_mode = settings.get("scan_mode", "full_automation")
                 saved_data_type = settings.get("saved_data_type", "raw_images_well_plate")
@@ -217,15 +325,15 @@ class OrchestrationSystem:
                     "illumination_settings": copy.deepcopy(settings["illumination_settings"]),
                     "do_contrast_autofocus": settings["do_contrast_autofocus"],
                     "do_reflection_af": settings["do_reflection_af"],
-                    "pending_datetimes": pending_datetimes, 
+                    "pending_datetimes": pending_datetimes,
                     "imaged_datetimes": imaged_datetimes,
-                    "imaging_started_flag": settings["imaging_started"], 
-                    "imaging_completed_flag": settings["imaging_completed"]
+                    "imaging_started_flag": normalized_settings["imaging_started"],
+                    "imaging_completed_flag": normalized_settings["imaging_completed"]
                 }
-                
+
                 if scan_mode == "full_automation":
                     parsed_settings_config["incubator_slot"] = settings["incubator_slot"]
-                
+
                 if saved_data_type == "raw_images_well_plate":
                     parsed_settings_config.update({
                         "wells_to_scan": copy.deepcopy(settings["wells_to_scan"]),
@@ -246,7 +354,7 @@ class OrchestrationSystem:
                     # Optional move_for_autofocus for raw_image_flexible
                     if "move_for_autofocus" in settings:
                         parsed_settings_config["move_for_autofocus"] = settings["move_for_autofocus"]
-                
+
                 new_task_configs[task_name] = parsed_settings_config
             except KeyError as e:
                 logger.error(f"Missing key {e} in configuration settings for sample {task_name}. Skipping.")
@@ -254,17 +362,18 @@ class OrchestrationSystem:
             except ValueError as e: # Catch errors from datetime.fromisoformat if string is not naive or malformed
                 logger.error(f"Error parsing time strings (ensure they are naive local time) for sample {task_name}: {e}. Skipping.")
                 continue
-        
+
         tasks_to_remove = [name for name in self.tasks if name not in new_task_configs]
         for task_name in tasks_to_remove:
             logger.info(f"Task {task_name} removed from configuration. Deactivating.")
-            if self.active_task_name == task_name:
-                logger.warning(f"Active task {task_name} was removed from config.")
-                self.active_task_name = None 
+            if task_name in self._active_task_names:
+                logger.warning(f"Running task {task_name} was removed from config while still active.")
+                self._mark_task_not_running(task_name)
             del self.tasks[task_name]
 
         a_task_state_changed_for_write = False
         for task_name, current_settings_config in new_task_configs.items():
+            raw_settings_for_task = raw_settings_by_task.get(task_name, {})
             operational_state_from_file = {}
             for sample_in_file in raw_config_data.get("samples", []):
                 if sample_in_file.get("name") == task_name:
@@ -282,50 +391,60 @@ class OrchestrationSystem:
                 else:
                     current_actual_status = persisted_status  # Keep uploading or paused status
             elif persisted_status == "completed" and current_settings_config["pending_datetimes"]:
-                 # If file said completed, but now there are pending points (e.g. user added them)
-                 current_actual_status = "pending" # Reset to pending
-                 logger.info(f"Task '{task_name}' was completed but now has pending points. Resetting status to pending.")
-                 a_task_state_changed_for_write = True
+                # If file said completed, but now there are pending points (e.g. user added them)
+                current_actual_status = "pending" # Reset to pending
+                logger.info(f"Task '{task_name}' was completed but now has pending points. Resetting status to pending.")
+                a_task_state_changed_for_write = True
 
             if task_name not in self.tasks:
                 logger.info(f"New task added: {task_name}")
                 self.tasks[task_name] = {
-                    "config": current_settings_config, 
+                    "config": current_settings_config,
                     "status": current_actual_status,
-                    "_raw_settings_from_input": copy.deepcopy(sample_config_from_file.get("settings", {}))
+                    "_raw_settings_from_input": copy.deepcopy(raw_settings_for_task)
                 }
                 a_task_state_changed_for_write = True # Status might have been determined above
 
             else: # Task already exists, update it
                 existing_task_data = self.tasks[task_name]
+                previous_config = existing_task_data["config"]
+                previous_raw_settings = existing_task_data.get("_raw_settings_from_input", {})
                 # Check for config changes that might warrant a state reset
                 # Note: well_plate_type is not checked here as it's now read from incubator service
                 config_changed_significantly = (
-                    existing_task_data["config"]["pending_datetimes"] != current_settings_config["pending_datetimes"] or
-                    existing_task_data["config"]["imaged_datetimes"] != current_settings_config["imaged_datetimes"] or
-                    any(existing_task_data["config"].get(k) != current_settings_config.get(k) 
+                    previous_config["pending_datetimes"] != current_settings_config["pending_datetimes"] or
+                    previous_config["imaged_datetimes"] != current_settings_config["imaged_datetimes"] or
+                    any(previous_config.get(k) != current_settings_config.get(k)
                         for k in ["incubator_slot", "allocated_microscope", "wells_to_scan", "Nx", "Ny"])
                 )
 
-                existing_task_data["config"] = current_settings_config # Always update config
-                existing_task_data["_raw_settings_from_input"] = copy.deepcopy(sample_config_from_file.get("settings", {}))
-                a_task_state_changed_for_write = True # Assume config change implies write needed
+                config_changed = previous_config != current_settings_config
+                raw_settings_changed = previous_raw_settings != raw_settings_for_task
+                if config_changed:
+                    existing_task_data["config"] = current_settings_config
+                if raw_settings_changed:
+                    existing_task_data["_raw_settings_from_input"] = copy.deepcopy(raw_settings_for_task)
+                if config_changed or raw_settings_changed:
+                    a_task_state_changed_for_write = True
 
                 if existing_task_data["status"] != current_actual_status:
                     logger.info(f"Task '{task_name}' status changing from '{existing_task_data['status']}' to '{current_actual_status}' due to config load/re-evaluation.")
                     existing_task_data["status"] = current_actual_status
+                    a_task_state_changed_for_write = True
 
                 if config_changed_significantly and existing_task_data["status"] not in ["pending", "completed", "paused"]:
                     if current_settings_config["pending_datetimes"]:
                         if existing_task_data["status"] != "pending":
                             logger.info(f"Task '{task_name}' had significant config changes while in status '{existing_task_data['status']}'. Resetting to pending as new points exist.")
                             existing_task_data["status"] = "pending"
+                            a_task_state_changed_for_write = True
                     elif not existing_task_data["config"]["imaged_datetimes"]:
                         # No pending, no imaged, but config changed? Should be completed. Or if no pending but imaged.
-                         if existing_task_data["status"] != "completed":
+                        if existing_task_data["status"] != "completed":
                             logger.info(f"Task '{task_name}' had significant config changes. No pending points. Marking completed.")
                             existing_task_data["status"] = "completed"
-            
+                            a_task_state_changed_for_write = True
+
             # Final status check: if a task somehow ends up with status != completed but no pending_datetimes, fix it.
             # But respect 'uploading' and 'paused' status - don't force it to completed
             task_state_dict = self.tasks[task_name]
@@ -685,38 +804,21 @@ class OrchestrationSystem:
     async def setup_connections(self): 
         """Set up ONE stable connection to local Hypha server and get all service proxies.
         The server connection is kept alive throughout, only service proxies are refreshed on failures."""
-        operational_token = os.environ.get("REEF_LOCAL_TOKEN")
-        operational_workspace = os.environ.get("REEF_LOCAL_WORKSPACE")
-        
-        if not operational_token: 
-            logger.error("REEF_LOCAL_TOKEN not set. Cannot setup local connections.")
-            return False
-        if not operational_workspace:
-            logger.error("REEF_LOCAL_WORKSPACE not set. Cannot setup local connections.")
-            return False
-
-        # Create or reuse the stable server connection
         try:
-            if not self.local_server_connection:
-                logger.info(f"Creating stable connection to local Hypha server: {self.server_url}")
-                self.local_server_connection = await connect_to_server({
-                    "server_url": self.server_url, 
-                    "token": operational_token,
-                    "workspace": operational_workspace,
-                    "ping_interval": 30
-                })
-                logger.info("Stable server connection established.")
-            else:
-                logger.info("Reusing existing stable server connection.")
-            
+            connection = await self._ensure_local_server_connection()
+            if not connection:
+                return False
+
+            logger.info("Reusing existing stable server connection.")
+
             # Get service proxies from the stable connection
             if not self.incubator:
-                self.incubator = await self.local_server_connection.get_service(self.incubator_id)
+                self.incubator = await connection.get_service(self.incubator_id)
                 logger.info(f"Incubator ({self.incubator_id}) service proxy obtained.")
                 await self._start_health_check('incubator', self.incubator, self.incubator_id)
                 
             if not self.robotic_arm:
-                self.robotic_arm = await self.local_server_connection.get_service(self.robotic_arm_id)
+                self.robotic_arm = await connection.get_service(self.robotic_arm_id)
                 logger.info(f"Robotic arm ({self.robotic_arm_id}) service proxy obtained.")
                 await self._start_health_check('robotic_arm', self.robotic_arm, self.robotic_arm_id)
             
@@ -735,7 +837,7 @@ class OrchestrationSystem:
             if mic_id not in self.microscope_services: 
                 logger.info(f"Getting service proxy for microscope: {mic_id}...")
                 try:
-                    microscope_service_instance = await self.local_server_connection.get_service(mic_id)
+                    microscope_service_instance = await connection.get_service(mic_id)
                     self.microscope_services[mic_id] = microscope_service_instance
                     if mic_id not in self.sample_on_microscope_flags:
                         self.sample_on_microscope_flags[mic_id] = False
@@ -789,24 +891,86 @@ class OrchestrationSystem:
                 
         logger.info("Disconnect process completed.")
 
+    async def _run_manual_transport_operation(self, action: str, incubator_slot: int, microscope_id: str):
+        """Execute a transport request directly if all required resources are idle."""
+        if not self.incubator or not self.robotic_arm or microscope_id not in self.microscope_services:
+            setup_ok = await self.setup_connections()
+            if not setup_ok or microscope_id not in self.microscope_services:
+                raise Exception(f"Transport services are not ready for microscope {microscope_id}.")
+
+        request = self._build_request(
+            f"manual-{action}",
+            microscope_id=microscope_id,
+            incubator_slot=incubator_slot,
+            extra_resources=self._transport_resources(),
+            metadata={"trigger": "api", "action": action},
+        )
+
+        async with self.admission_controller.hold(request):
+            if action == "load":
+                await self._execute_load_operation(
+                    incubator_slot,
+                    microscope_id,
+                    manage_transport_resources=False,
+                )
+            elif action == "unload":
+                await self._execute_unload_operation(
+                    incubator_slot,
+                    microscope_id,
+                    manage_transport_resources=False,
+                )
+            else:
+                raise ValueError(f"Unknown manual transport action '{action}'.")
+
     async def load_plate_from_incubator_to_microscope_api(self, incubator_slot: int, microscope_id: str):
         """API endpoint to load a plate from incubator to microscope."""
         logger.info(f"API call: load_plate_from_incubator_to_microscope for slot {incubator_slot} to microscope {microscope_id}")
-        
+
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
             return {"success": False, "message": msg}
 
         try:
-            await self._queue_transport_operation("load", incubator_slot, microscope_id)
+            await self._run_manual_transport_operation("load", incubator_slot, microscope_id)
             return {"success": True, "message": f"Load task for slot {incubator_slot} to microscope {microscope_id} completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Load request for slot {incubator_slot} to microscope {microscope_id} rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
         except Exception as e:
             logger.error(f"Load operation failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
-    async def _execute_load_operation(self, incubator_slot: int, microscope_id_str: str):
+    async def _execute_load_operation(
+        self,
+        incubator_slot: int,
+        microscope_id_str: str,
+        *,
+        manage_transport_resources: bool = True,
+    ):
         """Execute the load operation: move sample from incubator to microscope."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-load",
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "load",
+                    "microscope_id": microscope_id_str,
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_load_operation(
+                    incubator_slot,
+                    microscope_id_str,
+                    manage_transport_resources=False,
+                )
+                return
+
         target_microscope_service = self.microscope_services.get(microscope_id_str)
         if not target_microscope_service:
             raise Exception(f"Microscope service {microscope_id_str} is not connected.")
@@ -879,21 +1043,517 @@ class OrchestrationSystem:
     async def unload_plate_from_microscope_api(self, incubator_slot: int, microscope_id: str):
         """API endpoint to unload a plate from microscope to incubator."""
         logger.info(f"API call: unload_plate_from_microscope for slot {incubator_slot} from microscope {microscope_id}")
-        
+
         if microscope_id not in self.configured_microscopes_info:
             msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
             logger.error(msg)
             return {"success": False, "message": msg}
 
         try:
-            await self._queue_transport_operation("unload", incubator_slot, microscope_id)
+            await self._run_manual_transport_operation("unload", incubator_slot, microscope_id)
             return {"success": True, "message": f"Unload task for slot {incubator_slot} from microscope {microscope_id} completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Unload request for slot {incubator_slot} from microscope {microscope_id} rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
         except Exception as e:
             logger.error(f"Unload operation failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
-    async def _execute_unload_operation(self, incubator_slot: int, microscope_id_str: str):
+    async def _execute_load_to_hamilton_operation(
+        self,
+        incubator_slot: int,
+        *,
+        manage_transport_resources: bool = True,
+    ):
+        """Execute the load operation: move sample from incubator to Hamilton."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-load-hamilton",
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "load_to_hamilton",
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_load_to_hamilton_operation(
+                    incubator_slot,
+                    manage_transport_resources=False,
+                )
+                return
+
+        # Verify sample is in incubator before loading
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Incubator reports sample location for slot {incubator_slot}: {actual_location}")
+            if actual_location != "incubator_slot":
+                logger.warning(f"Sample not in incubator slot {incubator_slot}, location: {actual_location}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
+
+        logger.info(f"Loading sample from incubator slot {incubator_slot} to Hamilton...")
+
+        # Mark critical operation
+        self.in_critical_operation = True
+        logger.info("CRITICAL OPERATION START: Robotic arm loading sample to Hamilton")
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
+
+        try:
+            # Start parallel operations: prepare incubator and move robot
+            await asyncio.gather(
+                self.incubator.get_sample_from_slot_to_transfer_station(incubator_slot),
+                self.robotic_arm.transport_to_incubator()
+            )
+
+            # Move sample with robotic arm: incubator -> Hamilton
+            await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
+            await self.robotic_arm.incubator_to_hamilton()
+
+            # Update sample location to Hamilton
+            await self.incubator.update_sample_location(incubator_slot, "hamilton")
+
+            logger.info("Sample loaded onto Hamilton.")
+
+        except Exception as e:
+            error_msg = f"Failed to load sample from slot {incubator_slot} to Hamilton: {e}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        finally:
+            self.in_critical_operation = False
+            logger.info("CRITICAL OPERATION END: Robotic arm load to Hamilton complete")
+            self._unmark_critical_services(critical_services)
+
+    async def _execute_unload_from_hamilton_operation(
+        self,
+        incubator_slot: int,
+        *,
+        manage_transport_resources: bool = True,
+    ):
+        """Execute the unload operation: move sample from Hamilton to incubator."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-unload-hamilton",
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "unload_from_hamilton",
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_unload_from_hamilton_operation(
+                    incubator_slot,
+                    manage_transport_resources=False,
+                )
+                return
+
+        # Verify sample is at Hamilton before unloading
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
+
+            if actual_location == "incubator_slot":
+                logger.info(f"Sample already in incubator slot {incubator_slot}, no unload needed")
+                return
+            elif actual_location != "hamilton":
+                logger.warning(f"Sample not at Hamilton, location: {actual_location}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
+
+        logger.info(f"Unloading sample from Hamilton to incubator slot {incubator_slot}...")
+
+        # Mark critical operation
+        self.in_critical_operation = True
+        logger.info("CRITICAL OPERATION START: Robotic arm unloading sample from Hamilton")
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
+
+        try:
+            # Move sample with robotic arm: Hamilton -> incubator
+            await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
+            await self.robotic_arm.hamilton_to_incubator()
+
+            # Put sample back to incubator slot
+            await self.incubator.put_sample_from_transfer_station_to_slot(incubator_slot)
+            await self.incubator.update_sample_location(incubator_slot, "incubator_slot")
+
+            logger.info("Sample unloaded from Hamilton to incubator.")
+
+        except Exception as e:
+            error_msg = f"Failed to unload sample from Hamilton to slot {incubator_slot}: {e}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        finally:
+            self.in_critical_operation = False
+            logger.info("CRITICAL OPERATION END: Robotic arm unload from Hamilton complete")
+            self._unmark_critical_services(critical_services)
+
+    async def load_plate_from_incubator_to_hamilton_api(self, incubator_slot: int):
+        """API endpoint to load a plate from incubator to Hamilton."""
+        logger.info(f"API call: load_plate_from_incubator_to_hamilton for slot {incubator_slot}")
+
+        try:
+            if not self.incubator or not self.robotic_arm:
+                setup_ok = await self.setup_connections()
+                if not setup_ok:
+                    raise Exception("Transport services are not ready.")
+
+            request = self._build_request(
+                "manual-load-hamilton",
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={"trigger": "api", "action": "load_to_hamilton"},
+            )
+
+            async with self.admission_controller.hold(request):
+                await self._execute_load_to_hamilton_operation(
+                    incubator_slot,
+                    manage_transport_resources=False,
+                )
+            return {"success": True, "message": f"Load task for slot {incubator_slot} to Hamilton completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Load request for slot {incubator_slot} to Hamilton rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
+        except Exception as e:
+            logger.error(f"Load operation to Hamilton failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def unload_plate_from_hamilton_to_incubator_api(self, incubator_slot: int):
+        """API endpoint to unload a plate from Hamilton to incubator."""
+        logger.info(f"API call: unload_plate_from_hamilton_to_incubator for slot {incubator_slot}")
+
+        try:
+            if not self.incubator or not self.robotic_arm:
+                setup_ok = await self.setup_connections()
+                if not setup_ok:
+                    raise Exception("Transport services are not ready.")
+
+            request = self._build_request(
+                "manual-unload-hamilton",
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={"trigger": "api", "action": "unload_from_hamilton"},
+            )
+
+            async with self.admission_controller.hold(request):
+                await self._execute_unload_from_hamilton_operation(
+                    incubator_slot,
+                    manage_transport_resources=False,
+                )
+            return {"success": True, "message": f"Unload task for slot {incubator_slot} from Hamilton completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Unload request for slot {incubator_slot} from Hamilton rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
+        except Exception as e:
+            logger.error(f"Unload operation from Hamilton failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def _execute_microscope_to_hamilton_operation(
+        self,
+        incubator_slot: int,
+        microscope_id_str: str,
+        *,
+        manage_transport_resources: bool = True,
+    ):
+        """Execute the transport operation: move sample from microscope to Hamilton."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-microscope-to-hamilton",
+                microscope_id=microscope_id_str,
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "microscope_to_hamilton",
+                    "microscope_id": microscope_id_str,
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_microscope_to_hamilton_operation(
+                    incubator_slot,
+                    microscope_id_str,
+                    manage_transport_resources=False,
+                )
+                return
+
+        target_microscope_service = self.microscope_services.get(microscope_id_str)
+        if not target_microscope_service:
+            raise Exception(f"Microscope service {microscope_id_str} is not connected.")
+
+        robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
+
+        # Verify sample is on the microscope
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
+
+            expected_microscope_location = f"microscope{robot_microscope_target_id}"
+            if actual_location != expected_microscope_location:
+                logger.warning(f"Sample not on microscope {microscope_id_str}, location: {actual_location}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
+
+        if not self.sample_on_microscope_flags.get(microscope_id_str, False):
+            logger.info(f"Sample plate not on microscope {microscope_id_str} according to flags")
+            return
+
+        logger.info(f"Transporting sample from microscope {microscope_id_str} to Hamilton (slot {incubator_slot})...")
+
+        # Mark critical operation
+        self.in_critical_operation = True
+        logger.info("CRITICAL OPERATION START: Robotic arm transporting sample from microscope to Hamilton")
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('microscope', microscope_id_str),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
+
+        try:
+            # Home microscope stage
+            await target_microscope_service.home_stage()
+
+            # Move sample with robotic arm: microscope -> Hamilton
+            await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
+            await self.robotic_arm.microscope_to_hamilton(robot_microscope_target_id)
+
+            # Return stage and update location
+            await asyncio.gather(
+                target_microscope_service.return_stage(),
+                self.incubator.update_sample_location(incubator_slot, "hamilton")
+            )
+
+            self.sample_on_microscope_flags[microscope_id_str] = False
+            logger.info("Sample transported from microscope to Hamilton.")
+
+        except Exception as e:
+            error_msg = f"Failed to transport sample from microscope {microscope_id_str} to Hamilton: {e}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        finally:
+            self.in_critical_operation = False
+            logger.info("CRITICAL OPERATION END: Robotic arm microscope to Hamilton complete")
+            self._unmark_critical_services(critical_services)
+
+    async def _execute_hamilton_to_microscope_operation(
+        self,
+        incubator_slot: int,
+        microscope_id_str: str,
+        *,
+        manage_transport_resources: bool = True,
+    ):
+        """Execute the transport operation: move sample from Hamilton to microscope."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-hamilton-to-microscope",
+                microscope_id=microscope_id_str,
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "hamilton_to_microscope",
+                    "microscope_id": microscope_id_str,
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_hamilton_to_microscope_operation(
+                    incubator_slot,
+                    microscope_id_str,
+                    manage_transport_resources=False,
+                )
+                return
+
+        target_microscope_service = self.microscope_services.get(microscope_id_str)
+        if not target_microscope_service:
+            raise Exception(f"Microscope service {microscope_id_str} is not connected.")
+
+        robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
+
+        # Verify sample is at Hamilton
+        try:
+            actual_location = await self.incubator.get_sample_location(incubator_slot)
+            logger.info(f"Incubator reports sample location for slot {incubator_slot}: {actual_location}")
+            if actual_location != "hamilton":
+                logger.warning(f"Sample not at Hamilton, location: {actual_location}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
+
+        if self.sample_on_microscope_flags.get(microscope_id_str, False):
+            logger.info(f"Sample plate already on microscope {microscope_id_str}. Skipping load.")
+            return
+
+        logger.info(f"Transporting sample from Hamilton to microscope {microscope_id_str} (slot {incubator_slot})...")
+
+        # Mark critical operation
+        self.in_critical_operation = True
+        logger.info("CRITICAL OPERATION START: Robotic arm transporting sample from Hamilton to microscope")
+        critical_services = [
+            ('robotic_arm', self.robotic_arm_id),
+            ('microscope', microscope_id_str),
+            ('incubator', self.incubator_id)
+        ]
+        self._mark_critical_services(critical_services)
+
+        try:
+            # Prepare microscope and move robot in parallel
+            await asyncio.gather(
+                target_microscope_service.home_stage(),
+                self.robotic_arm.transport_to_incubator()
+            )
+
+            # Move sample with robotic arm: Hamilton -> microscope
+            await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
+            await self.robotic_arm.hamilton_to_microscope(robot_microscope_target_id)
+
+            # Return stage and update location
+            await asyncio.gather(
+                target_microscope_service.return_stage(),
+                self.incubator.update_sample_location(incubator_slot, f"microscope{robot_microscope_target_id}")
+            )
+
+            self.sample_on_microscope_flags[microscope_id_str] = True
+            logger.info("Sample transported from Hamilton to microscope.")
+
+        except Exception as e:
+            error_msg = f"Failed to transport sample from Hamilton to microscope {microscope_id_str}: {e}"
+            logger.error(error_msg)
+            self.sample_on_microscope_flags[microscope_id_str] = False
+            raise Exception(error_msg)
+        finally:
+            self.in_critical_operation = False
+            logger.info("CRITICAL OPERATION END: Robotic arm Hamilton to microscope complete")
+            self._unmark_critical_services(critical_services)
+
+    async def transport_plate_from_microscope_to_hamilton_api(self, incubator_slot: int, microscope_id: str):
+        """API endpoint to transport a plate from microscope to Hamilton."""
+        logger.info(f"API call: transport_plate_from_microscope_to_hamilton for slot {incubator_slot} from microscope {microscope_id}")
+
+        if microscope_id not in self.configured_microscopes_info:
+            msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
+            logger.error(msg)
+            return {"success": False, "message": msg}
+
+        try:
+            if not self.incubator or not self.robotic_arm or microscope_id not in self.microscope_services:
+                setup_ok = await self.setup_connections()
+                if not setup_ok or microscope_id not in self.microscope_services:
+                    raise Exception(f"Transport services are not ready for microscope {microscope_id}.")
+
+            request = self._build_request(
+                "manual-microscope-to-hamilton",
+                microscope_id=microscope_id,
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={"trigger": "api", "action": "microscope_to_hamilton"},
+            )
+
+            async with self.admission_controller.hold(request):
+                await self._execute_microscope_to_hamilton_operation(
+                    incubator_slot,
+                    microscope_id,
+                    manage_transport_resources=False,
+                )
+            return {"success": True, "message": f"Transport from microscope {microscope_id} to Hamilton completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Transport request from microscope {microscope_id} to Hamilton rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
+        except Exception as e:
+            logger.error(f"Transport from microscope to Hamilton failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def transport_plate_from_hamilton_to_microscope_api(self, incubator_slot: int, microscope_id: str):
+        """API endpoint to transport a plate from Hamilton to microscope."""
+        logger.info(f"API call: transport_plate_from_hamilton_to_microscope for slot {incubator_slot} to microscope {microscope_id}")
+
+        if microscope_id not in self.configured_microscopes_info:
+            msg = f"Microscope ID '{microscope_id}' not found in configured microscopes."
+            logger.error(msg)
+            return {"success": False, "message": msg}
+
+        try:
+            if not self.incubator or not self.robotic_arm or microscope_id not in self.microscope_services:
+                setup_ok = await self.setup_connections()
+                if not setup_ok or microscope_id not in self.microscope_services:
+                    raise Exception(f"Transport services are not ready for microscope {microscope_id}.")
+
+            request = self._build_request(
+                "manual-hamilton-to-microscope",
+                microscope_id=microscope_id,
+                incubator_slot=incubator_slot,
+                extra_resources=self._transport_resources(),
+                metadata={"trigger": "api", "action": "hamilton_to_microscope"},
+            )
+
+            async with self.admission_controller.hold(request):
+                await self._execute_hamilton_to_microscope_operation(
+                    incubator_slot,
+                    microscope_id,
+                    manage_transport_resources=False,
+                )
+            return {"success": True, "message": f"Transport from Hamilton to microscope {microscope_id} completed."}
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Transport request from Hamilton to microscope {microscope_id} rejected because "
+                f"the orchestrator is busy."
+            )
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
+        except Exception as e:
+            logger.error(f"Transport from Hamilton to microscope failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def _execute_unload_operation(
+        self,
+        incubator_slot: int,
+        microscope_id_str: str,
+        *,
+        manage_transport_resources: bool = True,
+    ):
         """Execute the unload operation: move sample from microscope to incubator."""
+        if manage_transport_resources:
+            request = self._build_request(
+                "transport-unload",
+                extra_resources=self._transport_resources(),
+                metadata={
+                    "phase": "unload",
+                    "microscope_id": microscope_id_str,
+                    "incubator_slot": incubator_slot,
+                },
+            )
+            async with self.admission_controller.hold(request, wait=True):
+                await self._execute_unload_operation(
+                    incubator_slot,
+                    microscope_id_str,
+                    manage_transport_resources=False,
+                )
+                return
+
         target_microscope_service = self.microscope_services.get(microscope_id_str)
         if not target_microscope_service:
             raise Exception(f"Microscope service {microscope_id_str} is not connected.")
@@ -965,7 +1625,7 @@ class OrchestrationSystem:
 
         This method continuously polls the microscope service every 10 seconds to check
         the scan progress. It handles WebSocket interruptions gracefully by retrying
-        failed status checks.
+        failed status checks. Also monitors busy_status for enhanced state tracking.
 
         Args:
             microscope_service: The microscope service proxy to poll
@@ -995,6 +1655,7 @@ class OrchestrationSystem:
                 
                 # Extract status information
                 status = status_response.get("state", "unknown")
+                busy_status = status_response.get("busy_status", "unknown")
                 
                 # Log full response for debugging when status is unknown
                 if status == "unknown":
@@ -1012,6 +1673,9 @@ class OrchestrationSystem:
                     raise Exception(error_msg)
                 
                 elif status == "running":
+                    # Log busy_status if available for enhanced debugging
+                    if busy_status != "unknown":
+                        logger.debug(f"Scan running - busy_status: {busy_status}")
                     # Continue polling
                     await asyncio.sleep(poll_interval)
                 
@@ -1053,11 +1717,157 @@ class OrchestrationSystem:
                 # Wait before retrying
                 await asyncio.sleep(poll_interval)
 
+    async def _reap_finished_cycle_tasks(self):
+        """Clean up completed background cycle tasks."""
+        completed_task_names = [
+            task_name
+            for task_name, task in self._scheduled_cycle_tasks.items()
+            if task.done()
+        ]
+
+        for task_name in completed_task_names:
+            finished_task = self._scheduled_cycle_tasks.pop(task_name)
+            try:
+                await finished_task
+            except Exception as exc:
+                logger.error(f"Background cycle task '{task_name}' exited with an unexpected error: {exc}")
+
+    async def _start_due_task(self, task_name: str, earliest_pending_tp: datetime) -> bool:
+        """Attempt to start a due task if its resources are currently idle."""
+        if task_name in self._scheduled_cycle_tasks:
+            return False
+
+        task_data = self.tasks.get(task_name)
+        if not task_data:
+            logger.warning(f"Task '{task_name}' disappeared before scheduling.")
+            return False
+
+        task_config_for_cycle = copy.deepcopy(task_data["config"])
+        allocated_microscope_id = task_config_for_cycle.get("allocated_microscope")
+        if not allocated_microscope_id:
+            logger.error(f"Task {task_name} does not have an 'allocated_microscope'. Marking as error.")
+            await self._update_task_state_and_write_config(task_name, status="error")
+            return False
+
+        if allocated_microscope_id not in self.configured_microscopes_info:
+            logger.error(f"Task '{task_name}' references unknown microscope '{allocated_microscope_id}'.")
+            await self._update_task_state_and_write_config(task_name, status="error")
+            return False
+
+        scan_mode = task_config_for_cycle.get("scan_mode", "full_automation")
+        incubator_slot = None
+        if scan_mode == "full_automation":
+            incubator_slot = task_config_for_cycle.get("incubator_slot")
+            if incubator_slot is None:
+                logger.error(f"Task '{task_name}' is full_automation but missing 'incubator_slot'.")
+                await self._update_task_state_and_write_config(task_name, status="error")
+                return False
+
+        try:
+            if scan_mode == "full_automation":
+                if not self.incubator or not self.robotic_arm or allocated_microscope_id not in self.microscope_services:
+                    await self.setup_connections()
+                if not self.incubator or not self.robotic_arm:
+                    logger.warning(f"Shared transport services are not ready for task '{task_name}'. Will retry later.")
+                    return False
+            elif allocated_microscope_id not in self.microscope_services:
+                await self.setup_connections()
+        except Exception as setup_error:
+            logger.warning(f"Failed to prepare services for task '{task_name}': {setup_error}")
+            return False
+
+        target_microscope_service = self.microscope_services.get(allocated_microscope_id)
+        if not target_microscope_service:
+            logger.warning(f"Microscope '{allocated_microscope_id}' is not available for task '{task_name}'.")
+            return False
+
+        request = self._build_request(
+            "scheduled-cycle",
+            task_name=task_name,
+            microscope_id=allocated_microscope_id,
+            incubator_slot=incubator_slot,
+            metadata={
+                "trigger": "scheduler",
+                "timepoint": earliest_pending_tp.strftime("%Y-%m-%dT%H:%M:%S"),
+                "scan_mode": scan_mode,
+            },
+        )
+
+        try:
+            lease = await self.admission_controller.try_acquire(request)
+        except ResourceBusyError as busy_error:
+            blockers = ", ".join(
+                f"{blocker.resource}:{blocker.operation_type}"
+                for blocker in busy_error.blockers
+            )
+            logger.info(f"Task '{task_name}' is due but blocked by active resources: {blockers}")
+            return False
+
+        await self._update_task_state_and_write_config(task_name, status="active")
+        self._mark_task_running(task_name)
+
+        try:
+            cycle_task = asyncio.create_task(
+                self._run_scheduled_cycle(
+                    task_name=task_name,
+                    task_config_for_cycle=task_config_for_cycle,
+                    target_microscope_service=target_microscope_service,
+                    allocated_microscope_id=allocated_microscope_id,
+                    current_pending_tp_to_process=earliest_pending_tp,
+                    lease=lease,
+                )
+            )
+            self._scheduled_cycle_tasks[task_name] = cycle_task
+            return True
+        except Exception:
+            self._mark_task_not_running(task_name)
+            await self.admission_controller.release(lease.operation_id)
+            raise
+
+    async def _run_scheduled_cycle(
+        self,
+        *,
+        task_name: str,
+        task_config_for_cycle: dict,
+        target_microscope_service,
+        allocated_microscope_id: str,
+        current_pending_tp_to_process: datetime,
+        lease,
+    ):
+        """Run one scheduled cycle in the background while holding the task lease."""
+        scan_mode = task_config_for_cycle.get("scan_mode", "full_automation")
+
+        try:
+            if scan_mode == "full_automation":
+                await self.run_cycle(task_config_for_cycle, target_microscope_service, allocated_microscope_id)
+            else:
+                await self.run_microscope_only_cycle(task_config_for_cycle, target_microscope_service, allocated_microscope_id)
+
+            logger.info(
+                f"Cycle for task {task_name} on {allocated_microscope_id}, "
+                f"time point {current_pending_tp_to_process.isoformat()} success."
+            )
+            await self._update_task_state_and_write_config(
+                task_name,
+                status="waiting_for_next_run",
+                current_tp_to_move_to_imaged=current_pending_tp_to_process,
+            )
+        except Exception as cycle_error:
+            logger.error(
+                f"Cycle for task {task_name} on {allocated_microscope_id}, "
+                f"time point {current_pending_tp_to_process.isoformat()} failed: {cycle_error}"
+            )
+            await self._update_task_state_and_write_config(task_name, status="error")
+        finally:
+            self._mark_task_not_running(task_name)
+            self._scheduled_cycle_tasks.pop(task_name, None)
+            await self.admission_controller.release(lease.operation_id)
+
     async def run_cycle(self, task_config, microscope_service, allocated_microscope_id): # MODIFIED: added microscope_service, allocated_microscope_id
         """Run the complete load-scan-unload process for a given task on a specific microscope."""
         task_name = task_config["name"]
         incubator_slot = task_config["incubator_slot"]
-        action_id = f"{task_name.replace(' ', '_')}"
+        action_id = f"{task_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         logger.info(f"Starting imaging cycle for task: {task_name} on microscope {allocated_microscope_id} with action_id: {action_id}")
 
         # Verify essential services (incubator, arm) are available - microscope_service is passed in and presumed connected by caller
@@ -1076,9 +1886,6 @@ class OrchestrationSystem:
             logger.info(f"Service task statuses reset for task {task_name} on {allocated_microscope_id}.")
         except Exception as e:
             logger.error(f"Error resetting task statuses on services for {task_name} on {allocated_microscope_id}: {e}. Proceeding with caution.")
-
-        # Ensure the specific microscope's sample flag is false before load, other microscopes' flags are untouched.
-        self.sample_on_microscope_flags[allocated_microscope_id] = False 
 
         try:
             # Pass allocated_microscope_id to transport operations
@@ -1172,7 +1979,7 @@ class OrchestrationSystem:
     async def run_microscope_only_cycle(self, task_config, microscope_service, allocated_microscope_id):
         """Run microscope-only scan without robotic arm/incubator. Supports raw_images_well_plate and raw_image_flexible."""
         task_name = task_config["name"]
-        action_id = f"{task_name.replace(' ', '_')}"
+        action_id = f"{task_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         saved_data_type = task_config.get("saved_data_type", "raw_images_well_plate")
         
         self.in_critical_operation = True
@@ -1218,24 +2025,27 @@ class OrchestrationSystem:
     async def run_time_lapse(self):
         """Main orchestration loop to manage and run imaging tasks based on config.json."""
         logger.info("Orchestrator run_time_lapse started.")
-        last_config_read_time = 0
+        loop = asyncio.get_running_loop()
+        last_config_read_time = 0.0
 
         while True:
             current_time_naive = datetime.now()
 
-            if (asyncio.get_event_loop().time() - last_config_read_time) > CONFIG_READ_INTERVAL:
+            if (loop.time() - last_config_read_time) > CONFIG_READ_INTERVAL:
                 await self._load_and_update_tasks()
-                last_config_read_time = asyncio.get_event_loop().time()
+                last_config_read_time = loop.time()
 
-            next_task_to_run = None
-            earliest_pending_tp_for_selection = None 
+            await self._reap_finished_cycle_tasks()
 
             if not self.tasks:
                 logger.debug("No tasks loaded yet.")
-            
+
             eligible_tasks_for_run = []
 
             for task_name, task_data in list(self.tasks.items()):
+                if task_name in self._scheduled_cycle_tasks:
+                    continue
+
                 internal_config = task_data["config"]
                 status = task_data["status"]
                 pending_datetimes = internal_config.get("pending_datetimes", [])
@@ -1256,230 +2066,112 @@ class OrchestrationSystem:
                     logger.debug(f"Task '{task_name}' is eligible with TP: {earliest_tp_for_this_task.isoformat()}")
                 else:
                     logger.debug(f"Task '{task_name}' not due yet (earliest TP: {earliest_tp_for_this_task.isoformat()}).")
-            
-            # Select the task with the overall earliest time point from eligible tasks
-            if eligible_tasks_for_run:
-                eligible_tasks_for_run.sort(key=lambda x: x[1])
-                next_task_to_run, earliest_pending_tp_for_selection = eligible_tasks_for_run[0]
-                logger.info(f"Selected task '{next_task_to_run}' for TP: {earliest_pending_tp_for_selection.isoformat()} from eligible tasks.")
+            eligible_tasks_for_run.sort(key=lambda item: item[1])
+            started_any = False
+            for task_name, due_time in eligible_tasks_for_run:
+                started = await self._start_due_task(task_name, due_time)
+                started_any = started_any or started
 
-            if next_task_to_run and earliest_pending_tp_for_selection:
-                self.active_task_name = next_task_to_run
-                task_data = self.tasks[self.active_task_name]
-                task_config_for_cycle = task_data["config"]
-                current_pending_tp_to_process = earliest_pending_tp_for_selection
-                
-                allocated_microscope_id = task_config_for_cycle.get("allocated_microscope")
-                if not allocated_microscope_id:
-                    logger.error(f"Task {self.active_task_name} does not have an 'allocated_microscope'. Skipping.")
-                    await self._update_task_state_and_write_config(self.active_task_name, status="error")
-                    self.active_task_name = None
-                    await asyncio.sleep(ORCHESTRATOR_LOOP_SLEEP) # Prevent rapid looping on misconfiguration
+            # Determine minimum wait time before next loop iteration
+            min_wait_time = ORCHESTRATOR_LOOP_SLEEP
+            next_potential_run_time = None
+            for task_name, task_data_val in self.tasks.items():
+                if task_name in self._scheduled_cycle_tasks:
                     continue
+                if task_data_val["status"] not in ["completed", "error", "uploading", "paused"] and task_data_val["config"]["pending_datetimes"]:
+                    earliest_tp = task_data_val["config"]["pending_datetimes"][0]
+                    if next_potential_run_time is None or earliest_tp < next_potential_run_time:
+                        next_potential_run_time = earliest_tp
 
-                scan_mode = task_config_for_cycle.get("scan_mode", "full_automation")
-                
-                try:
-                    if scan_mode == "full_automation":
-                        if not self.incubator or not self.robotic_arm or allocated_microscope_id not in self.microscope_services:
-                            await self.setup_connections()
-                    elif allocated_microscope_id not in self.microscope_services:
-                        await self.setup_connections()
-                except Exception as setup_error:
-                    await self._update_task_state_and_write_config(self.active_task_name, status="error")
-                    self.active_task_name = None
-                    await asyncio.sleep(ORCHESTRATOR_LOOP_SLEEP)
-                    raise Exception(f"Failed to setup connections: {setup_error}")
-                
-                target_microscope_service = self.microscope_services.get(allocated_microscope_id)
-                if not target_microscope_service:
-                    await self._update_task_state_and_write_config(self.active_task_name, status="error")
-                    self.active_task_name = None
-                    await asyncio.sleep(ORCHESTRATOR_LOOP_SLEEP)
-                    raise Exception(f"Microscope {allocated_microscope_id} not available")
+            if next_potential_run_time and next_potential_run_time > current_time_naive:
+                wait_seconds = (next_potential_run_time - current_time_naive).total_seconds()
+                min_wait_time = max(0.1, min(wait_seconds, ORCHESTRATOR_LOOP_SLEEP))
+                logger.debug(f"Calculated dynamic sleep: {min_wait_time:.2f}s until next potential task time ({next_potential_run_time.isoformat()})")
+            elif eligible_tasks_for_run and not started_any:
+                min_wait_time = 1.0
 
-                await self._update_task_state_and_write_config(self.active_task_name, status="active")
-                
-                try:
-                    if scan_mode == "full_automation":
-                        await self.run_cycle(task_config_for_cycle, target_microscope_service, allocated_microscope_id)
-                    else:
-                        await self.run_microscope_only_cycle(task_config_for_cycle, target_microscope_service, allocated_microscope_id)
-                    
-                    logger.info(f"Cycle for task {self.active_task_name} on {allocated_microscope_id}, time point {current_pending_tp_to_process.isoformat()} success.")
-                    await self._update_task_state_and_write_config(
-                        self.active_task_name,
-                        status="waiting_for_next_run",
-                        current_tp_to_move_to_imaged=current_pending_tp_to_process
-                    )
-                except Exception as cycle_error:
-                    logger.error(f"Cycle for task {self.active_task_name} on {allocated_microscope_id}, time point {current_pending_tp_to_process.isoformat()} failed: {cycle_error}")
-                    await self._update_task_state_and_write_config(
-                        self.active_task_name,
-                        status="error"
-                    )
+            if self._scheduled_cycle_tasks:
+                min_wait_time = min(min_wait_time, 1.0)
 
-                self.active_task_name = None
-            else:
-                if self.active_task_name:
-                    logger.warning("Active task was set but no task selected for run. Clearing active_task_name.")
-                    self.active_task_name = None
-                
-                # Determine minimum wait time before next loop iteration
-                min_wait_time = ORCHESTRATOR_LOOP_SLEEP
-                next_potential_run_time = None
-                for task_data_val in self.tasks.values():
-                    if task_data_val["status"] not in ["completed", "error", "uploading", "paused"] and task_data_val["config"]["pending_datetimes"]:
-                        earliest_tp = task_data_val["config"]["pending_datetimes"][0]
-                        if next_potential_run_time is None or earliest_tp < next_potential_run_time:
-                            next_potential_run_time = earliest_tp
-                
-                if next_potential_run_time and next_potential_run_time > current_time_naive:
-                    wait_seconds = (next_potential_run_time - current_time_naive).total_seconds()
-                    min_wait_time = max(0.1, min(wait_seconds, ORCHESTRATOR_LOOP_SLEEP))
-                    logger.debug(f"Calculated dynamic sleep: {min_wait_time:.2f}s until next potential task time ({next_potential_run_time.isoformat()})")
+            await asyncio.sleep(min_wait_time)
 
-                await asyncio.sleep(min_wait_time)
-
-    async def _transport_worker_loop(self):
-        logger.info("Transport worker loop started.")
-        while True:
-            try:
-                # Get a transport task from the queue
-                task_details = await self.transport_queue.get()
-                action = task_details.get("action")
-                incubator_slot = task_details.get("incubator_slot")
-                microscope_id_for_transport = task_details.get("microscope_id") # Get microscope_id
-                future_to_resolve = task_details.get("future")
-
-                # Track current operation
-                self._current_transport_operation = {
-                    "action": action,
-                    "incubator_slot": incubator_slot,
-                    "microscope_id": microscope_id_for_transport
-                }
-
-                logger.info(f"Transport worker picked up task: {action} for slot {incubator_slot} on microscope {microscope_id_for_transport}")
-                
-                if not microscope_id_for_transport:
-                    error_msg = f"Transport task {action} for slot {incubator_slot} missing microscope_id."
-                    logger.error(error_msg)
-                    if future_to_resolve: future_to_resolve.set_exception(ValueError(error_msg))
-                    self.transport_queue.task_done()
-                    continue
-
-                # Ensure connections are set up before checking for microscope service
-                if not self.incubator or not self.robotic_arm or microscope_id_for_transport not in self.microscope_services:
-                    logger.info(f"Essential services or microscope {microscope_id_for_transport} not ready for transport operation {action}. Running setup_connections.")
-                    try:
-                        await self.setup_connections()
-                        logger.info(f"Connection setup completed for transport operation {action} on microscope {microscope_id_for_transport}")
-                    except Exception as setup_error:
-                        error_msg = f"Failed to setup connections for transport operation {action} on microscope {microscope_id_for_transport}: {setup_error}"
-                        logger.error(error_msg)
-                        if future_to_resolve: future_to_resolve.set_exception(Exception(error_msg))
-                        self.transport_queue.task_done()
-                        continue
-
-                # Check again for the specific microscope after setup_connections
-                target_microscope_service = self.microscope_services.get(microscope_id_for_transport)
-                if not target_microscope_service:
-                    error_msg = f"Microscope service {microscope_id_for_transport} not connected for transport operation {action} even after setup_connections attempt."
-                    logger.error(error_msg)
-                    if future_to_resolve: future_to_resolve.set_exception(Exception(error_msg))
-                    self.transport_queue.task_done()
-                    continue
-                
-                try:
-                    if action == "load":
-                        await self._execute_load_operation(incubator_slot, microscope_id_for_transport) # Pass microscope_id
-                        if future_to_resolve: future_to_resolve.set_result(True)
-                    elif action == "unload":
-                        await self._execute_unload_operation(incubator_slot, microscope_id_for_transport) # Pass microscope_id
-                        if future_to_resolve: future_to_resolve.set_result(True)
-                    else:
-                        error_msg = f"Unknown transport action: {action}"
-                        logger.warning(f"Transport worker received unknown action: {action}")
-                        if future_to_resolve: future_to_resolve.set_exception(ValueError(error_msg))
-
-                except Exception as e:
-                    logger.error(f"Transport worker failed for {action} on slot {incubator_slot}, microscope {microscope_id_for_transport}: {e}")
-                    if future_to_resolve and not future_to_resolve.done():
-                        future_to_resolve.set_exception(e)
-                finally:
-                    # Clear current operation tracking
-                    self._current_transport_operation = None
-                
-                self.transport_queue.task_done()
-                logger.info(f"Transport task {action} for slot {incubator_slot}, microscope {microscope_id_for_transport} completed")
-
-            except asyncio.CancelledError:
-                logger.info("Transport worker loop cancelled.")
-                break
-            except Exception as e:
-                logger.error(f"Exception in transport worker loop: {e}", exc_info=True)
-
-    async def _start_transport_worker(self):
-        if self._transport_worker_task is None or self._transport_worker_task.done():
-            self._transport_worker_task = asyncio.create_task(self._transport_worker_loop())
-            logger.info("Transport worker task created and started.")
-        else:
-            logger.info("Transport worker task already running.")
-
-    async def _stop_transport_worker(self):
-        if self._transport_worker_task and not self._transport_worker_task.done():
-            logger.info("Stopping transport worker task...")
-            self.transport_queue.put_nowait(None)
-            self._transport_worker_task.cancel()
-            try:
-                await self._transport_worker_task
-            except asyncio.CancelledError:
-                logger.info("Transport worker task successfully cancelled.")
-            self._transport_worker_task = None
-        else:
-            logger.info("Transport worker task not running or already stopped.")
-
-    async def _register_self_as_hypha_service(self):
-        logger.info(f"Registering orchestrator as a Hypha service with ID '{self.orchestrator_hypha_service_id}' on server '{self.orchestrator_hypha_server_url}' in workspace '{self.workspace}'")
-        if not self.token_for_orchestrator_registration:
-            logger.error("REEF_WORKSPACE_TOKEN is not set in environment. Cannot register orchestrator service.")
+    async def cancel_running_cycles(self):
+        """Cancel all running scheduled cycle tasks during shutdown."""
+        if not self._scheduled_cycle_tasks:
             return
 
-        server_config_for_registration = {
-            "server_url": self.orchestrator_hypha_server_url,
-            "ping_interval": 30,
-            "workspace": self.workspace,
-            "token": self.token_for_orchestrator_registration
-        }
-        
-        self.orchestrator_hypha_server_connection = await connect_to_server(server_config_for_registration)
-        logger.info(f"Successfully connected to Hypha server: {self.orchestrator_hypha_server_url} for orchestrator registration")
+        logger.info(f"Cancelling {len(self._scheduled_cycle_tasks)} running scheduled cycle task(s)...")
+        running_items = list(self._scheduled_cycle_tasks.items())
+        for _, task in running_items:
+            task.cancel()
 
-        service_api = {
-            "name": "Orchestrator Manager",
-            "id": self.orchestrator_hypha_service_id,
-            "config": {
-                "visibility": "protected",
-            },
-            "ping": self.ping,
-            "add_imaging_task": self.add_imaging_task,
-            "delete_imaging_task": self.delete_imaging_task,
-            "pause_imaging_task": self.pause_imaging_task,
-            "resume_imaging_task": self.resume_imaging_task,
-            "get_all_imaging_tasks": self.get_all_imaging_tasks,
-            "load_plate_from_incubator_to_microscope": self.load_plate_from_incubator_to_microscope_api,
-            "unload_plate_from_microscope": self.unload_plate_from_microscope_api,
-            "get_transport_queue_status": self.get_transport_queue_status,
-            "process_timelapse_offline": self.process_timelapse_offline_api,
-            "scan_microscope_only": self.scan_microscope_only_api,
-            "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
-        }
-        
-        registered_service = await self.orchestrator_hypha_server_connection.register_service(service_api)
-        logger.info(f"Orchestrator management service registered successfully. Service ID: {registered_service.id}")
-        
-        # Start the transport worker after successful registration
-        await self._start_transport_worker()
+        for task_name, task in running_items:
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.info(f"Scheduled cycle task '{task_name}' cancelled during shutdown.")
+            except Exception as exc:
+                logger.error(f"Scheduled cycle task '{task_name}' failed while shutting down: {exc}")
+
+        self._scheduled_cycle_tasks.clear()
+        self._active_task_names.clear()
+        self._refresh_legacy_active_task_name()
+
+    async def _register_self_as_hypha_service(self):
+        registration_succeeded = False
+
+        logger.info(
+            f"Registering orchestrator as a Hypha service with ID '{self.orchestrator_hypha_service_id}' "
+            f"on cloud server '{self.orchestrator_hypha_server_url}' in workspace '{self.workspace}'"
+        )
+        if self.token_for_orchestrator_registration:
+            server_config_for_registration = {
+                "server_url": self.orchestrator_hypha_server_url,
+                "ping_interval": 30,
+                "workspace": self.workspace,
+                "token": self.token_for_orchestrator_registration,
+            }
+
+            self.orchestrator_hypha_server_connection = await connect_to_server(server_config_for_registration)
+            logger.info(
+                f"Successfully connected to Hypha server: {self.orchestrator_hypha_server_url} "
+                "for orchestrator registration"
+            )
+            registered_service = await self.orchestrator_hypha_server_connection.register_service(
+                self._build_service_api(),
+                overwrite=True,
+            )
+            logger.info(
+                "Orchestrator management service registered successfully on cloud Hypha. "
+                f"Service ID: {registered_service.id}"
+            )
+            registration_succeeded = True
+        else:
+            logger.warning(
+                "REEF_WORKSPACE_TOKEN is not set in environment. Skipping cloud orchestrator registration."
+            )
+
+        logger.info(
+            f"Registering orchestrator on local Hypha server '{self.server_url}' in workspace "
+            f"'{self.local_workspace or '<missing>'}'"
+        )
+        try:
+            local_connection = await self._ensure_local_server_connection()
+            if local_connection:
+                registered_service = await local_connection.register_service(
+                    self._build_service_api(),
+                    overwrite=True,
+                )
+                logger.info(
+                    "Orchestrator management service registered successfully on local Hypha. "
+                    f"Service ID: {registered_service.id}"
+                )
+                registration_succeeded = True
+        except Exception as exc:
+            logger.error(f"Failed to register orchestrator service on local Hypha: {exc}")
+
+        if not registration_succeeded:
+            logger.warning("Orchestrator service was not registered on any Hypha endpoint.")
 
     @schema_function(skip_self=True)
     async def ping(self):
@@ -1656,6 +2348,12 @@ class OrchestrationSystem:
         logger.info(f"Attempting to delete imaging task: {task_name}")
         if not task_name:
             return {"success": False, "message": "Task name cannot be empty."}
+        if task_name in self._scheduled_cycle_tasks:
+            return {
+                "success": False,
+                "message": f"Task '{task_name}' is currently running and cannot be deleted.",
+                "state": "busy",
+            }
 
         async with self._config_lock:
             try:
@@ -1695,6 +2393,12 @@ class OrchestrationSystem:
         """Pauses an imaging task, preventing it from being processed until resumed."""
         if task_name not in self.tasks:
             return {"success": False, "message": f"Task '{task_name}' not found."}
+        if task_name in self._scheduled_cycle_tasks:
+            return {
+                "success": False,
+                "message": f"Task '{task_name}' is currently running and cannot be paused.",
+                "state": "busy",
+            }
         if self.tasks[task_name]["status"] == "paused":
             return {"success": True, "message": f"Task '{task_name}' is already paused."}
         await self._update_task_state_and_write_config(task_name, status="paused")
@@ -1732,66 +2436,217 @@ class OrchestrationSystem:
 
     @schema_function(skip_self=True)
     async def get_transport_queue_status(self):
-        """Returns the current status of the transport queue and worker."""
+        """Returns the current busy/admission status for transport-related operations."""
         logger.debug("Getting transport queue status")
         try:
-            # Get queue size (items waiting, not including current operation)
-            queue_size = self.transport_queue.qsize()
-            
-            # Check if transport worker is running
-            worker_running = (
-                self._transport_worker_task is not None and 
-                not self._transport_worker_task.done()
+            admission_snapshot = await self.admission_controller.snapshot()
+            active_operations = admission_snapshot["active_operations"]
+            current_operation = next(
+                (
+                    operation for operation in active_operations
+                    if operation["operation_type"].startswith("manual-")
+                    or operation["operation_type"].startswith("transport-")
+                ),
+                None,
             )
-            
-            # Get worker status details
-            worker_status = "stopped" # Default if not running or completed/cancelled/error
-            if self._transport_worker_task is None:
-                worker_status = "not_started"
-            elif not self._transport_worker_task.done(): # Explicitly check if running
-                 worker_status = "running"
-            elif self._transport_worker_task.done():
-                if self._transport_worker_task.cancelled():
-                    worker_status = "cancelled"
-                elif self._transport_worker_task.exception():
-                    worker_status = "error"
-                else: # Successfully completed its loop (should not happen for a continuous worker unless explicitly stopped)
-                    worker_status = "completed_normally" 
-            
-            # Get current operation if one is in progress
-            current_operation = None
-            if self._current_transport_operation:
-                current_operation = self._current_transport_operation.copy()
-            
-            # Get sample on microscope flags for all configured microscopes
+
             sample_on_flags_per_microscope = {}
             for mic_id in self.configured_microscopes_info.keys():
                 sample_on_flags_per_microscope[mic_id] = self.sample_on_microscope_flags.get(mic_id, False)
 
             status_info = {
-                "queue_size": queue_size,  # Items waiting in queue
-                "current_operation": current_operation,  # Operation currently being executed (None if idle)
-                "worker_running": worker_running,
-                "worker_detailed_status": worker_status,
+                "mode": "reject_when_busy",
+                "queue_enabled": False,
+                "queue_size": 0,
+                "current_operation": current_operation,
+                "worker_running": False,
+                "worker_detailed_status": "disabled",
+                "active_operations": active_operations,
+                "held_resources": admission_snapshot["held_resources"],
                 "sample_on_microscope_flags": sample_on_flags_per_microscope,
                 "connected_microscopes": list(self.microscope_services.keys()),
-                "active_task": self.active_task_name
+                "active_task": self.active_task_name,
+                "active_tasks": sorted(self._active_task_names),
             }
-            
-            # Add worker exception info if there was an error
-            if worker_status == "error" and self._transport_worker_task and self._transport_worker_task.done():
-                try:
-                    exception = self._transport_worker_task.exception()
-                    status_info["worker_error"] = str(exception)
-                except Exception:
-                    status_info["worker_error"] = "Unknown error retrieving exception details"
-            
+
             logger.debug(f"Transport queue status: {status_info}")
             return status_info
-            
+
         except Exception as e:
             logger.error(f"Failed to get transport queue status: {e}", exc_info=True)
             return {"error": str(e), "success": False}
+
+    @schema_function(skip_self=True)
+    async def get_runtime_status(self):
+        """Return a runtime snapshot for operator preflight checks and failure triage."""
+        try:
+            if not self.configured_microscopes_info and not self.tasks:
+                await self._load_and_update_tasks()
+
+            expected_microscopes = list(self.configured_microscopes_info.keys())
+            local_services_ready = (
+                self.incubator is not None
+                and self.robotic_arm is not None
+                and all(microscope_id in self.microscope_services for microscope_id in expected_microscopes)
+            )
+            if expected_microscopes and not local_services_ready:
+                try:
+                    await self.setup_connections()
+                except Exception as setup_error:
+                    logger.warning(f"Could not refresh local service proxies while building runtime status: {setup_error}")
+
+            admission_snapshot = await self.admission_controller.snapshot()
+            connected_microscopes = sorted(self.microscope_services.keys())
+            sample_on_flags_per_microscope = {
+                mic_id: self.sample_on_microscope_flags.get(mic_id, False)
+                for mic_id in expected_microscopes
+            }
+            connected_services = {
+                "incubator": self.incubator is not None,
+                "robotic_arm": self.robotic_arm is not None,
+                "microscopes": {
+                    mic_id: mic_id in self.microscope_services
+                    for mic_id in expected_microscopes
+                },
+            }
+
+            return {
+                "success": True,
+                "active_task": self.active_task_name,
+                "active_tasks": sorted(self._active_task_names),
+                "active_operations": admission_snapshot["active_operations"],
+                "held_resources": admission_snapshot["held_resources"],
+                "connected_services": connected_services,
+                "connected_microscopes": connected_microscopes,
+                "configured_microscopes": expected_microscopes,
+                "critical_services": sorted(
+                    [
+                        {"service_type": service_type, "service_id": service_id}
+                        for service_type, service_id in self.critical_services
+                    ],
+                    key=lambda item: (item["service_type"], item["service_id"]),
+                ),
+                "in_critical_operation": self.in_critical_operation,
+                "sample_on_microscope_flags": sample_on_flags_per_microscope,
+                "local_hypha": {
+                    "server_url": self.server_url,
+                    "workspace": self.local_workspace,
+                    "connected": self.local_server_connection is not None,
+                },
+                "cloud_hypha": {
+                    "server_url": self.orchestrator_hypha_server_url,
+                    "workspace": self.workspace,
+                    "connected": self.orchestrator_hypha_server_connection is not None,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Failed to get runtime status: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
+    async def get_incubator_samples(self, slot: int = None, only_available: bool = False):
+        """Return incubator sample metadata for the lab smoke-test picker."""
+        try:
+            if not self.incubator:
+                setup_ok = await self.setup_connections()
+                if not setup_ok or not self.incubator:
+                    raise Exception("Incubator service is not available.")
+
+            sample_payload = await self.incubator.get_slot_information(slot)
+            if sample_payload is None:
+                sample_records = []
+            elif isinstance(sample_payload, list):
+                sample_records = sample_payload
+            else:
+                sample_records = [sample_payload]
+
+            normalized_samples = []
+            for sample in sample_records:
+                sample_name = (sample.get("name") or "").strip()
+                location = sample.get("location") or "unknown"
+                normalized = {
+                    "incubator_slot": sample.get("incubator_slot"),
+                    "name": sample_name,
+                    "status": sample.get("status") or "",
+                    "location": location,
+                    "well_plate_type": sample.get("well_plate_type") or "96",
+                    "date_to_incubator": sample.get("date_to_incubator") or "",
+                    "available": bool(sample_name and location == "incubator_slot"),
+                }
+                if only_available and not normalized["available"]:
+                    continue
+                normalized_samples.append(normalized)
+
+            normalized_samples.sort(key=lambda item: item["incubator_slot"])
+            return {
+                "success": True,
+                "requested_slot": slot,
+                "only_available": only_available,
+                "samples": normalized_samples,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get incubator samples: {e}", exc_info=True)
+            return {"success": False, "message": str(e), "samples": []}
+
+    @schema_function(skip_self=True)
+    async def cancel_microscope_scan(self, microscope_id: str):
+        """Operator emergency API to cancel a running microscope scan.
+        
+        Note: scan_cancel() performs async cancellation. The scan may continue briefly
+        in the background before stopping. The result message indicates whether the
+        scan was stopped immediately or is stopping gracefully.
+        """
+        if microscope_id not in self.configured_microscopes_info:
+            return {"success": False, "message": f"Unknown microscope ID '{microscope_id}'."}
+
+        try:
+            if microscope_id not in self.microscope_services:
+                await self.setup_connections()
+            microscope_service = self.microscope_services.get(microscope_id)
+            if not microscope_service:
+                raise Exception(f"Microscope service {microscope_id} is not available.")
+
+            result = await microscope_service.scan_cancel()
+            
+            # Handle new async cancellation behavior
+            # scan_cancel() may return a message indicating the scan is stopping in background
+            result_msg = result.get("message", "") if isinstance(result, dict) else str(result)
+            is_async_cancel = "stopping in the background" in result_msg.lower()
+            
+            if is_async_cancel:
+                logger.info(f"Scan on {microscope_id} is stopping in the background. "
+                           f"Result: {result_msg}")
+            else:
+                logger.info(f"Scan cancelled on {microscope_id}: {result_msg}")
+            
+            return {
+                "success": True,
+                "message": f"Cancel command sent to microscope {microscope_id}.",
+                "result": result,
+                "async_cancellation": is_async_cancel,
+            }
+        except Exception as e:
+            logger.error(f"Failed to cancel scan on {microscope_id}: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
+    async def halt_robotic_arm(self):
+        """Operator emergency API to halt the robotic arm immediately."""
+        try:
+            if not self.robotic_arm:
+                setup_ok = await self.setup_connections()
+                if not setup_ok or not self.robotic_arm:
+                    raise Exception("Robotic arm service is not available.")
+
+            result = await self.robotic_arm.halt()
+            return {
+                "success": True,
+                "message": "Robotic arm halt command sent.",
+                "result": result,
+            }
+        except Exception as e:
+            logger.error(f"Failed to halt robotic arm: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
 
     @schema_function(skip_self=True)
     async def get_lab_video_stream_urls(self):
@@ -1806,40 +2661,73 @@ class OrchestrationSystem:
     async def process_timelapse_offline_api(self, experiment_id: str, upload_immediately: bool = True, cleanup_temp_files: bool = True):
         """API wrapper for offline stitching and upload timelapse functionality."""
         logger.info(f"API call: process_timelapse_offline for experiment_id: {experiment_id}")
-        
+
         # Find matching tasks
         matching_tasks = [name for name in self.tasks.keys() if experiment_id in name]
         if not matching_tasks:
             return {"success": False, "message": f"No tasks found matching experiment_id: {experiment_id}"}
-        
-        # Set tasks to uploading status
-        for task_name in matching_tasks:
-            await self._update_task_state_and_write_config(task_name, status="uploading")
-        
+
+        allocated_microscopes = {
+            self.tasks[task_name]["config"].get("allocated_microscope")
+            for task_name in matching_tasks
+            if task_name in self.tasks
+        }
+        allocated_microscopes.discard(None)
+
+        if not allocated_microscopes:
+            return {"success": False, "message": f"No allocated microscope found for experiment_id: {experiment_id}"}
+        if len(allocated_microscopes) != 1:
+            return {
+                "success": False,
+                "message": (
+                    f"Experiment '{experiment_id}' spans multiple microscopes {sorted(allocated_microscopes)}. "
+                    "Offline processing must be run per microscope."
+                ),
+            }
+
+        microscope_id = next(iter(allocated_microscopes))
+        request = self._build_request(
+            "offline-processing",
+            microscope_id=microscope_id,
+            extra_resources=tuple(self._task_resource(task_name) for task_name in matching_tasks),
+            metadata={"experiment_id": experiment_id},
+        )
+
         try:
-            # Ensure microscope services are connected
-            if not self.microscope_services:
-                logger.info("No microscope services connected. Attempting to setup connections...")
+            if microscope_id not in self.microscope_services:
+                logger.info(f"Microscope {microscope_id} not connected. Attempting to setup connections...")
                 await self.setup_connections()
-            
-            # Get first available microscope service
-            microscope_service = next((service for service in self.microscope_services.values() if service), None)
+
+            microscope_service = self.microscope_services.get(microscope_id)
             if not microscope_service:
-                raise Exception("No microscope services available for offline processing")
-            
-            # Call offline stitching function
-            result = await microscope_service.process_timelapse_offline(
-                experiment_id=experiment_id,
-                upload_immediately=upload_immediately,
-                cleanup_temp_files=cleanup_temp_files
+                raise Exception(f"Microscope service {microscope_id} is not available for offline processing")
+
+            async with self.admission_controller.hold(request):
+                for task_name in matching_tasks:
+                    await self._update_task_state_and_write_config(task_name, status="uploading")
+
+                result = await microscope_service.process_timelapse_offline(
+                    experiment_id=experiment_id,
+                    upload_immediately=upload_immediately,
+                    cleanup_temp_files=cleanup_temp_files
+                )
+
+                for task_name in matching_tasks:
+                    await self._update_task_state_and_write_config(task_name, status="completed")
+
+                return {
+                    "success": True,
+                    "message": f"Offline processing completed for {len(matching_tasks)} tasks on {microscope_id}",
+                    "result": result,
+                    "microscope_id": microscope_id,
+                }
+        except ResourceBusyError as busy_error:
+            message = (
+                f"Offline processing for experiment_id '{experiment_id}' rejected because microscope "
+                f"{microscope_id} or related tasks are busy."
             )
-            
-            # Set tasks to completed
-            for task_name in matching_tasks:
-                await self._update_task_state_and_write_config(task_name, status="completed")
-            
-            return {"success": True, "message": f"Offline processing completed for {len(matching_tasks)} tasks", "result": result}
-            
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
         except Exception as e:
             logger.error(f"Offline processing failed for experiment_id {experiment_id}: {e}")
             # Set tasks to error status
@@ -1972,105 +2860,114 @@ class OrchestrationSystem:
             msg = f"Failed to connect to microscope {microscope_id}: {e}"
             logger.error(msg)
             return {"success": False, "message": msg}
-        
-        # Optional task linking - verify task exists and update status
+
+        linked_task_name = None
         if task_name:
             if task_name not in self.tasks:
-                msg = f"Task '{task_name}' not found for linking"
-                logger.warning(msg)
-                # Don't fail, just warn - scan can proceed without task linking
+                logger.warning(f"Task '{task_name}' not found for linking")
             else:
-                logger.info(f"Linking scan to task '{task_name}', updating status to 'active'")
-                await self._update_task_state_and_write_config(task_name, status="active")
-        
+                linked_task_name = task_name
+
         # Generate action_id if not provided
         if not action_id:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             action_id = f"microscope_only_scan_{microscope_id}_{timestamp}"
-        
+
+        request = self._build_request(
+            "manual-scan",
+            task_name=linked_task_name,
+            microscope_id=microscope_id,
+            metadata={"action_id": action_id, "saved_data_type": saved_data_type},
+        )
+
         logger.info(f"Starting microscope-only scan with action_id: {action_id}")
-        
-        # Mark microscope as critical during scan
-        self.in_critical_operation = True
-        logger.info(f"CRITICAL OPERATION START: Microscope-only scan on {microscope_id}")
+
         try:
-            self.critical_services.add(('microscope', microscope_id))
-        except Exception:
-            pass
-        
-        try:
-            # Build scan configuration based on saved_data_type
-            full_scan_config = {
-                "saved_data_type": saved_data_type,
-                "illumination_settings": scan_config["illumination_settings"],
-                "do_contrast_autofocus": scan_config["do_contrast_autofocus"],
-                "do_reflection_af": scan_config["do_reflection_af"],
-                "action_ID": action_id,
-            }
-            
-            if saved_data_type == "raw_images_well_plate":
-                # Add well plate type (default to '96' if not provided)
-                full_scan_config["well_plate_type"] = scan_config.get("well_plate_type", "96")
-                full_scan_config["wells_to_scan"] = scan_config["wells_to_scan"]
-                full_scan_config["Nx"] = scan_config["Nx"]
-                full_scan_config["Ny"] = scan_config["Ny"]
-                full_scan_config["dx"] = scan_config["dx"]
-                full_scan_config["dy"] = scan_config["dy"]
-                # Optional focus_map_points for raw_images_well_plate
-                if "focus_map_points" in scan_config:
-                    full_scan_config["focus_map_points"] = scan_config["focus_map_points"]
-            elif saved_data_type == "raw_image_flexible":
-                full_scan_config["positions"] = scan_config["positions"]
-                # Optional focus_map_points for raw_image_flexible
-                if "focus_map_points" in scan_config:
-                    full_scan_config["focus_map_points"] = scan_config["focus_map_points"]
-                # Optional move_for_autofocus for raw_image_flexible
-                if "move_for_autofocus" in scan_config:
-                    full_scan_config["move_for_autofocus"] = scan_config["move_for_autofocus"]
-            
-            logger.info(f"Initiating scan with config: {full_scan_config}")
-            
-            # Start the scan
-            scan_result = await microscope_service.scan_start(config=full_scan_config)
-            logger.info(f"Scan initiated successfully: {scan_result}")
-            
-            await self._poll_scan_status(
-                microscope_service=microscope_service,
-            )
-            
-            logger.info(f"Microscope-only scan completed successfully for action_id: {action_id}")
-            
-            # Update linked task status if applicable
-            if task_name and task_name in self.tasks:
-                logger.info(f"Updating linked task '{task_name}' status to 'waiting_for_next_run'")
-                await self._update_task_state_and_write_config(task_name, status="waiting_for_next_run")
-            
-            return {
-                "success": True, 
-                "message": f"Microscope-only scan completed successfully on {microscope_id}",
-                "action_id": action_id,
-                "microscope_id": microscope_id,
-                "scan_type": saved_data_type
-            }
-            
+            async with self.admission_controller.hold(request):
+                if linked_task_name:
+                    logger.info(f"Linking scan to task '{linked_task_name}', updating status to 'active'")
+                    await self._update_task_state_and_write_config(linked_task_name, status="active")
+
+                # Mark microscope as critical during scan
+                self.in_critical_operation = True
+                logger.info(f"CRITICAL OPERATION START: Microscope-only scan on {microscope_id}")
+                try:
+                    self.critical_services.add(('microscope', microscope_id))
+                except Exception:
+                    pass
+
+                try:
+                    # Build scan configuration based on saved_data_type
+                    full_scan_config = {
+                        "saved_data_type": saved_data_type,
+                        "illumination_settings": scan_config["illumination_settings"],
+                        "do_contrast_autofocus": scan_config["do_contrast_autofocus"],
+                        "do_reflection_af": scan_config["do_reflection_af"],
+                        "action_ID": action_id,
+                    }
+
+                    if saved_data_type == "raw_images_well_plate":
+                        # Add well plate type (default to '96' if not provided)
+                        full_scan_config["well_plate_type"] = scan_config.get("well_plate_type", "96")
+                        full_scan_config["wells_to_scan"] = scan_config["wells_to_scan"]
+                        full_scan_config["Nx"] = scan_config["Nx"]
+                        full_scan_config["Ny"] = scan_config["Ny"]
+                        full_scan_config["dx"] = scan_config["dx"]
+                        full_scan_config["dy"] = scan_config["dy"]
+                        # Optional focus_map_points for raw_images_well_plate
+                        if "focus_map_points" in scan_config:
+                            full_scan_config["focus_map_points"] = scan_config["focus_map_points"]
+                    elif saved_data_type == "raw_image_flexible":
+                        full_scan_config["positions"] = scan_config["positions"]
+                        # Optional focus_map_points for raw_image_flexible
+                        if "focus_map_points" in scan_config:
+                            full_scan_config["focus_map_points"] = scan_config["focus_map_points"]
+                        # Optional move_for_autofocus for raw_image_flexible
+                        if "move_for_autofocus" in scan_config:
+                            full_scan_config["move_for_autofocus"] = scan_config["move_for_autofocus"]
+
+                    logger.info(f"Initiating scan with config: {full_scan_config}")
+
+                    scan_result = await microscope_service.scan_start(config=full_scan_config)
+                    logger.info(f"Scan initiated successfully: {scan_result}")
+
+                    await self._poll_scan_status(
+                        microscope_service=microscope_service,
+                    )
+
+                    logger.info(f"Microscope-only scan completed successfully for action_id: {action_id}")
+
+                    if linked_task_name and linked_task_name in self.tasks:
+                        logger.info(f"Updating linked task '{linked_task_name}' status to 'waiting_for_next_run'")
+                        await self._update_task_state_and_write_config(linked_task_name, status="waiting_for_next_run")
+
+                    return {
+                        "success": True,
+                        "message": f"Microscope-only scan completed successfully on {microscope_id}",
+                        "action_id": action_id,
+                        "microscope_id": microscope_id,
+                        "scan_type": saved_data_type
+                    }
+                finally:
+                    self.in_critical_operation = False
+                    logger.info(f"CRITICAL OPERATION END: Microscope-only scan on {microscope_id}")
+                    try:
+                        self.critical_services.discard(('microscope', microscope_id))
+                    except Exception:
+                        pass
+        except ResourceBusyError as busy_error:
+            message = f"Microscope-only scan on {microscope_id} rejected because the microscope is busy."
+            logger.warning(message)
+            return self._busy_response(message, busy_error)
         except Exception as e:
             error_msg = f"Microscope-only scan failed: {e}"
             logger.error(error_msg, exc_info=True)
             
             # Update linked task to error status
-            if task_name and task_name in self.tasks:
-                await self._update_task_state_and_write_config(task_name, status="error")
+            if linked_task_name and linked_task_name in self.tasks:
+                await self._update_task_state_and_write_config(linked_task_name, status="error")
             
             return {"success": False, "message": error_msg, "action_id": action_id}
-            
-        finally:
-            # Always reset critical operation flag after scanning
-            self.in_critical_operation = False
-            logger.info(f"CRITICAL OPERATION END: Microscope-only scan on {microscope_id}")
-            try:
-                self.critical_services.discard(('microscope', microscope_id))
-            except Exception:
-                pass
 
 async def main():
     # parser = argparse.ArgumentParser(description='Run the Orchestration System.')
@@ -2090,7 +2987,7 @@ async def main():
     finally:
         logger.info("Performing cleanup... disconnecting services.")
         if orchestrator:
-            await orchestrator._stop_transport_worker() # Stop the worker
+            await orchestrator.cancel_running_cycles()
             if orchestrator.orchestrator_hypha_server_connection:
                 try:
                     await orchestrator.orchestrator_hypha_server_connection.disconnect()

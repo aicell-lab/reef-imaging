@@ -179,6 +179,83 @@ await server.serve()  # blocks
 | RealSense | `reef-realsense-feed` | reef-server |
 | Hamilton Cam | `reef-hamilton-feed` | Hamilton Windows PC |
 
+### Orchestrator APIs
+
+The orchestrator exposes the following Hypha service methods:
+
+| Method | Description |
+|--------|-------------|
+| `ping()` | Health check, returns "pong" |
+| `add_imaging_task(task_definition)` | Add/update an imaging task |
+| `delete_imaging_task(task_name)` | Delete an imaging task |
+| `pause_imaging_task(task_name)` | Pause a task |
+| `resume_imaging_task(task_name)` | Resume a paused task |
+| `get_all_imaging_tasks()` | Get all task configurations |
+| `get_transport_queue_status()` | Get transport operation status |
+| `get_runtime_status()` | Get full runtime snapshot |
+| `get_incubator_samples(slot, only_available)` | Get sample metadata from incubator |
+| `cancel_microscope_scan(microscope_id)` | Emergency scan cancellation |
+| `halt_robotic_arm()` | Emergency robot halt |
+| `scan_microscope_only(microscope_id, scan_config)` | Run scan without load/unload |
+| `process_timelapse_offline(experiment_id)` | Offline stitching and upload |
+| `get_lab_video_stream_urls()` | Get camera stream URLs |
+| `load_plate_from_incubator_to_microscope(incubator_slot, microscope_id)` | Load plate to microscope |
+| `unload_plate_from_microscope(incubator_slot, microscope_id)` | Unload plate from microscope |
+| `load_plate_from_incubator_to_hamilton(incubator_slot)` | **Load plate to Hamilton** |
+| `unload_plate_from_hamilton_to_incubator(incubator_slot)` | **Unload plate from Hamilton** |
+| `transport_plate_from_microscope_to_hamilton(incubator_slot, microscope_id)` | **Transport plate from microscope to Hamilton** |
+| `transport_plate_from_hamilton_to_microscope(incubator_slot, microscope_id)` | **Transport plate from Hamilton to microscope** |
+
+**Hamilton Transport:**
+Unlike microscope transport which requires 3 steps (grab → transport → put), Hamilton transport only needs 2 steps because the slide rail position (j6) is set within the grab/put path files:
+- **To Hamilton:** `grab_from_incubator` → `put_on_hamilton`
+- **From Hamilton:** `grab_from_hamilton` → `put_on_incubator`
+
+### Microscope Busy-State Management
+
+The microscope service implements centralized busy guards to prevent conflicting operations. The service tracks active operations by scope (`hardware`, `processing`) and rejects conflicting calls.
+
+**New RPC Methods:**
+- `get_busy_status()` - Returns the current busy state without full status
+  ```python
+  {
+      "busy_status": "idle",  # or "hardware", "processing", "both"
+      "hardware_busy": False,
+      "processing_busy": False
+  }
+  ```
+
+**Enhanced Methods:**
+- `get_status()` now includes:
+  ```python
+  {
+      # ... existing fields ...
+      "busy_status": "idle",      # "idle", "hardware", "processing", "both"
+      "hardware_busy": False,
+      "processing_busy": False
+  }
+  ```
+- `scan_get_status()` now includes:
+  ```python
+  {
+      "success": True,
+      "state": "running",         # "idle", "running", "completed", "failed"
+      "busy_status": "processing", # Current busy state during scan
+      "error_message": None,
+      "saved_data_type": "raw_images_well_plate"
+  }
+  ```
+
+**Error Handling:**
+Conflicting operations now fail with `MicroscopeBusyError` whose message starts with `MICROSCOPE_BUSY`. Clients should check for this prefix to handle busy states appropriately.
+
+**Scan Cancellation Behavior Change:**
+`scan_cancel()` no longer force-cancels the asyncio task immediately. Instead:
+1. Returns `"Scan cancellation requested; scan is stopping in the background"`
+2. The scan continues running in the background until it actually exits
+3. Clients should poll `scan_get_status()` to confirm the scan has stopped
+4. Do not assume cancel means immediate idle - the microscope may still be busy
+
 ## Running Services
 
 ### Start Infrastructure
@@ -193,6 +270,36 @@ cd docker && docker-compose up -d
 cd traefik && chmod 600 acme/acme.json && docker-compose up -d
 ```
 
+### Active tmux Sessions (Lab Server)
+
+The REEF lab server uses tmux sessions to manage running services:
+
+| Session | Pane | Service | Purpose |
+|---------|------|---------|---------|
+| `reef` | 0 | Incubator control | Cytomat incubator service |
+| `reef` | 1 | Robotic arm control | Dorna robotic arm service |
+| `reef` | 2 | Orchestrator | Main orchestration engine |
+| `reef` | 3-4 | Lab cameras | USB camera streams |
+| `reef-mirror` | - | Mirror services | Cloud-to-local proxy for all hardware |
+
+**Accessing sessions:**
+```bash
+# Attach to main reef session
+tmux attach -t reef
+
+# Attach to mirror services session
+tmux attach -t reef-mirror
+
+# Detach (keep session running): Press Ctrl+B then D
+```
+
+**Restarting services after code changes:**
+When modifying robotic arm, incubator, or orchestrator code, restart the respective service in its tmux pane:
+1. `tmux attach -t reef`
+2. Navigate to the correct pane (Ctrl+B + arrow keys)
+3. Ctrl+C to stop the service
+4. Re-run the start command (e.g., `python start_hypha_service_robotic_arm.py --local`)
+
 ### Start Orchestrator
 ```bash
 cd reef_imaging
@@ -200,6 +307,35 @@ python orchestrator.py  # Production (cloud mode)
 python orchestrator.py --local  # Local development
 python orchestrator_simulation.py --local  # No hardware simulation
 ```
+
+### Critical Hardware Smoke Test
+```bash
+reef-hardware-smoke-test
+```
+
+**⚠️ Agent Note:** The hardware smoke test is an interactive CLI tool and cannot be run by AI agents. The user must execute this command manually in their terminal.
+
+- This is a real hardware verification workflow, not a background diagnostic.
+- It exercises incubator access, robotic arm transport, and a short scan on each configured microscope.
+- A responsible person MUST remain physically on site in the lab for the entire run.
+- The script is intended for post-integration checks, post-maintenance checks, and safety validation after orchestration changes.
+- It stops on the first failure and offers emergency actions to cancel a scan or halt the robot.
+
+**Test Modes:**
+The smoke test now supports multiple test modes selected via interactive prompt:
+
+| Mode | Description |
+|------|-------------|
+| 1. Microscope only | Tests incubator ↔ microscope transport + scanning (default) |
+| 2. Hamilton only (incubator) | Tests incubator ↔ Hamilton transport |
+| 3. Hamilton only (microscope) | Tests microscope ↔ Hamilton transport |
+| 4. Hamilton full cycle | Tests incubator → Hamilton → microscope → Hamilton → incubator |
+| 5. Combined | Runs microscope tests followed by Hamilton full cycle |
+
+**Hamilton Test Flows:**
+- **Incubator ↔ Hamilton:** `load_plate_from_incubator_to_hamilton` → `unload_plate_from_hamilton_to_incubator`
+- **Microscope ↔ Hamilton:** `transport_plate_from_hamilton_to_microscope` → `transport_plate_from_microscope_to_hamilton`
+- **Full cycle:** Incubator → Hamilton → Microscope → Hamilton → Incubator
 
 ### Start Hardware Services
 ```bash
@@ -212,10 +348,23 @@ cd reef_imaging/control/dorna-control
 python start_hypha_service_robotic_arm.py --local
 
 # Mirror Services (cloud operation)
+# These run in the 'reef-mirror' tmux session and proxy cloud requests to local services
 cd reef_imaging/control/mirror-services
 python mirror_incubator.py &
 python mirror_robotic_arm.py &
+
+# Microscope mirrors (squid-control package has built-in mirroring)
+# These are configured in microscope configs and run automatically with microscope services
 ```
+
+**Mirror Services Summary:**
+| Mirror Service | Script | Proxies to Local |
+|----------------|--------|------------------|
+| Incubator mirror | `mirror_incubator.py` | `incubator-control` |
+| Robotic arm mirror | `mirror_robotic_arm.py` | `robotic-arm-control` |
+| Microscope 1 mirror | Built-in squid-control | `microscope-squid-1` |
+| Microscope 2 mirror | Built-in squid-control | `microscope-squid-2` |
+| Microscope 3 mirror | Built-in squid-control | `microscope-squid-plus-3` |
 
 ### Start Camera Services
 ```bash
@@ -287,6 +436,7 @@ os.replace('config.json.tmp', 'config.json')
 - GitHub Actions workflow runs every 9 minutes (`.github/workflows/service_check.yml`)
 - Orchestrator performs health checks every 30 seconds
 - Camera watchdogs restart services if health checks fail
+- Real hardware smoke tests are manual and operator-attended; they must not be treated as unattended automation
 
 ### Log Files
 | Log File | Service |

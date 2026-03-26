@@ -23,7 +23,7 @@ The REEF Imaging system is built on a modular architecture with four main layers
 1. **Orchestration Layer** (`orchestrator.py`)
    - Task scheduling and management from `config.json`
    - Hardware coordination (microscope, robotic arm, incubator)
-   - Transport queue for serialized sample handling
+   - Admission-controlled busy rejection for transport and scan conflicts
    - Health monitoring with automatic reconnection
    - Critical operation protection and error recovery
 
@@ -164,6 +164,28 @@ The orchestrator will:
 3. Load tasks from `config.json`
 4. Begin processing pending time points
 5. Monitor service health and automatically reconnect on failures
+
+### Critical Hardware Smoke Test
+
+Use the hardware smoke test before relying on a new lab setup, after device integration changes, and after safety-critical orchestration changes.
+
+This is a **real hardware test**. It moves plates with the robotic arm, accesses the incubator, and runs a short microscope scan on each configured microscope. A trained person MUST stay **on site in the lab for the entire run**. Do not run it unattended or remotely.
+
+Start the normal local services and the running orchestrator first, then run:
+
+```bash
+reef-hardware-smoke-test
+```
+
+The CLI will:
+- Query the running local orchestrator on Hypha
+- List available incubator samples
+- Let the operator select 1 to 5 samples
+- Run each selected sample through every configured microscope sequentially
+- Ask for confirmation before each cycle
+- Stop immediately on the first failure
+- Offer emergency actions to cancel a scan or halt the robot
+- Save a timestamped report under `hardware_test_reports/`
 
 ### Starting Individual Hardware Services
 

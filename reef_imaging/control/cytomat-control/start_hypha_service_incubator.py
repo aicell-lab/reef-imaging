@@ -140,6 +140,7 @@ class IncubatorService:
             "get_temperature": self.get_temperature,
             "get_co2_level": self.get_co2_level,
             "get_slot_information": self.get_slot_information,
+            "get_well_plate_type": self.get_well_plate_type,
             # Add new location-related functions
             "update_sample_location": self.update_sample_location,
             "get_sample_location": self.get_sample_location,
@@ -246,6 +247,33 @@ class IncubatorService:
             return slot_info
         except Exception as e:
             logger.error(f"Failed to get slot information: {e}")
+            raise e
+
+    @schema_function(skip_self=True)
+    def get_well_plate_type(self, slot: Optional[int] = Field(None, description="Slot number, range: 1-42, or None for all slots")):
+        """Return the configured well-plate type for one slot or all slots."""
+        try:
+            with open(self.samples_file, 'r') as file:
+                samples = json.load(file)
+
+            if slot is None:
+                well_plate_types = {
+                    sample["incubator_slot"]: sample.get("well_plate_type", "96")
+                    for sample in samples
+                }
+            else:
+                well_plate_types = next(
+                    (
+                        sample.get("well_plate_type", "96")
+                        for sample in samples
+                        if sample["incubator_slot"] == slot
+                    ),
+                    "96",
+                )
+
+            return well_plate_types
+        except Exception as e:
+            logger.error(f"Failed to get well plate type for slot {slot}: {e}")
             raise e
 
     @schema_function(skip_self=True)

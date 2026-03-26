@@ -26,8 +26,16 @@ The SQUID microscope control service manages imaging, stage positioning, and ill
   - Well plate scanning with specified parameters
   - Image acquisition and storage
   - Built-in mirror functionality for cloud/local operation
+  - **Busy-state guards** to prevent conflicting operations (tracks hardware and processing scopes)
 
 - **Main File:** `start_hypha_service_squid_control.py`
+
+- **Busy-State API:**
+  - `get_busy_status()` - Returns current busy state: `{"busy_status": "idle|hardware|processing|both", "hardware_busy": bool, "processing_busy": bool}`
+  - `get_status()` - Now includes `busy_status`, `hardware_busy`, `processing_busy` fields
+  - `scan_get_status()` - Now includes `busy_status` field during scans
+  - Operations rejected with `MICROSCOPE_BUSY` error when conflicting with active operations
+  - `scan_cancel()` performs graceful async cancellation; scan may continue briefly before stopping
 
 ### Robotic Arm Control (`dorna-control/`)
 

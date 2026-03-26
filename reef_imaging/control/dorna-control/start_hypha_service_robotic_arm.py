@@ -124,7 +124,12 @@ class RoboticArmService:
             "execute_action": self.execute_action,
             # Add microscope ID functions
             "incubator_to_microscope": self.incubator_to_microscope,
-            "microscope_to_incubator": self.microscope_to_incubator
+            "microscope_to_incubator": self.microscope_to_incubator,
+            # Add Hamilton functions
+            "incubator_to_hamilton": self.incubator_to_hamilton,
+            "hamilton_to_incubator": self.hamilton_to_incubator,
+            "microscope_to_hamilton": self.microscope_to_hamilton,
+            "hamilton_to_microscope": self.hamilton_to_microscope,
         })
 
         logger.info(f"Robotic arm control service registered at workspace: {server.config.workspace}, id: {svc.id}")
@@ -438,6 +443,110 @@ class RoboticArmService:
             return True
         except Exception as e:
             logger.error(f"Failed to move sample from microscope {microscope_id} to incubator: {e}")
+            raise e
+
+    @schema_function(skip_self=True)
+    def incubator_to_hamilton(self):
+        """
+        Move a sample from the incubator to Hamilton.
+        Note: No separate transport file needed as j6 is set in grab/put scripts.
+        Returns: bool
+        """
+        if not self.connected:
+            self.connect()
+        self.set_motor(1)
+        try:
+            self.play_script("paths/grab_from_incubator.txt")
+            self.play_script("paths/put_on_hamilton.txt")
+            logger.info("Sample moved from incubator to Hamilton")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to move sample from incubator to Hamilton: {e}")
+            raise e
+
+    @schema_function(skip_self=True)
+    def hamilton_to_incubator(self):
+        """
+        Move a sample from Hamilton to the incubator.
+        Note: No separate transport file needed as j6 is set in grab/put scripts.
+        Returns: bool
+        """
+        if not self.connected:
+            self.connect()
+        self.set_motor(1)
+        try:
+            self.play_script("paths/grab_from_hamilton.txt")
+            self.play_script("paths/put_on_incubator.txt")
+            logger.info("Sample moved from Hamilton to incubator")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to move sample from Hamilton to incubator: {e}")
+            raise e
+
+    @schema_function(skip_self=True)
+    def microscope_to_hamilton(self, microscope_id=1):
+        """
+        Move a sample from a microscope to Hamilton.
+        Note: No separate transport file needed as j6 is set in grab/put scripts.
+        Args:
+            microscope_id: Target microscope ID (1, 2, or 3)
+        Returns: bool
+        """
+        if not self.connected:
+            self.connect()
+        self.set_motor(1)
+        try:
+            if microscope_id == 1:
+                self.play_script("paths/grab_from_microscope1.txt")
+                self.play_script("paths/put_on_hamilton.txt")
+                logger.info("Sample moved from microscope 1 to Hamilton")
+            elif microscope_id == 2:
+                self.play_script("paths/grab_from_microscope2.txt")
+                self.play_script("paths/put_on_hamilton.txt")
+                logger.info("Sample moved from microscope 2 to Hamilton")
+            elif microscope_id == 3:  # squid+1 microscope
+                self.play_script("paths/grab_from_squid+1.txt")
+                self.play_script("paths/put_on_hamilton.txt")
+                logger.info("Sample moved from squid+1 microscope to Hamilton")
+            else:
+                logger.error(f"Invalid microscope ID: {microscope_id}")
+                raise Exception(f"Invalid microscope ID: {microscope_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to move sample from microscope {microscope_id} to Hamilton: {e}")
+            raise e
+
+    @schema_function(skip_self=True)
+    def hamilton_to_microscope(self, microscope_id=1):
+        """
+        Move a sample from Hamilton to a microscope.
+        Note: No separate transport file needed as j6 is set in grab/put scripts.
+        Args:
+            microscope_id: Target microscope ID (1, 2, or 3)
+        Returns: bool
+        """
+        if not self.connected:
+            self.connect()
+        self.set_motor(1)
+        try:
+            if microscope_id == 1:
+                self.play_script("paths/grab_from_hamilton.txt")
+                self.play_script("paths/put_on_microscope1.txt")
+                logger.info("Sample moved from Hamilton to microscope 1")
+            elif microscope_id == 2:
+                self.play_script("paths/grab_from_hamilton.txt")
+                self.play_script("paths/put_on_microscope2.txt")
+                logger.info("Sample moved from Hamilton to microscope 2")
+            elif microscope_id == 3:  # squid+1 microscope
+                self.play_script("paths/grab_from_hamilton.txt")
+                self.play_script("paths/put_on_squid+1.txt")
+                logger.info("Sample moved from Hamilton to squid+1 microscope")
+            else:
+                logger.error(f"Invalid microscope ID: {microscope_id}")
+                raise Exception(f"Invalid microscope ID: {microscope_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to move sample from Hamilton to microscope {microscope_id}: {e}")
             raise e
 
     @schema_function(skip_self=True)
