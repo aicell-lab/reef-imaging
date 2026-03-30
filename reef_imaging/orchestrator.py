@@ -1010,11 +1010,10 @@ class OrchestrationSystem:
         try:
             robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
 
-            # Start parallel operations: prepare incubator, home stage, move robot
+            # Start parallel operations: prepare incubator and home the stage
             await asyncio.gather(
                 self.incubator.get_sample_from_slot_to_transfer_station(incubator_slot),
                 target_microscope_service.home_stage(),
-                self.robotic_arm.transport_to_incubator()
             )
             
             # Move sample with robotic arm
@@ -1108,10 +1107,9 @@ class OrchestrationSystem:
         self._mark_critical_services(critical_services)
 
         try:
-            # Start parallel operations: prepare incubator and move robot
+            # Start parallel operations: prepare incubator
             await asyncio.gather(
                 self.incubator.get_sample_from_slot_to_transfer_station(incubator_slot),
-                self.robotic_arm.transport_to_incubator()
             )
 
             # Move sample with robotic arm: incubator -> Hamilton
@@ -1417,10 +1415,9 @@ class OrchestrationSystem:
         self._mark_critical_services(critical_services)
 
         try:
-            # Prepare microscope and move robot in parallel
+            # Prepare the microscope stage before the transfer
             await asyncio.gather(
                 target_microscope_service.home_stage(),
-                self.robotic_arm.transport_to_incubator()
             )
 
             # Move sample with robotic arm: Hamilton -> microscope

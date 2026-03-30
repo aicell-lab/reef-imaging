@@ -109,8 +109,6 @@ class RoboticArmService:
             "grab_sample_from_incubator": self.grab_sample_from_incubator,
             "put_sample_on_microscope1": self.put_sample_on_microscope1,
             "put_sample_on_incubator": self.put_sample_on_incubator,
-            "transport_from_incubator_to_microscope1": self.transport_from_incubator_to_microscope1,
-            "transport_to_incubator": self.transport_to_incubator,
             "connect": self.connect,
             "disconnect": self.disconnect,
             "halt": self.halt,
@@ -156,6 +154,81 @@ class RoboticArmService:
     def ping(self):
         """Ping function for health checks"""
         return "pong"
+
+    def _get_microscope_script_paths(self, microscope_id):
+        try:
+            microscope_id = int(microscope_id)
+        except (TypeError, ValueError) as exc:
+            raise Exception(f"Invalid microscope ID: {microscope_id}") from exc
+
+        if microscope_id == 1:
+            return {
+                "label": "microscope 1",
+                "grab": "paths/grab_from_microscope1.txt",
+                "put": "paths/put_on_microscope1.txt",
+            }
+        if microscope_id == 2:
+            return {
+                "label": "microscope 2",
+                "grab": "paths/grab_from_microscope2.txt",
+                "put": "paths/put_on_microscope2.txt",
+            }
+        if microscope_id == 3:
+            return {
+                "label": "squid+1 microscope",
+                "grab": "paths/grab_from_squid+1.txt",
+                "put": "paths/put_on_squid+1.txt",
+            }
+
+        raise Exception(f"Invalid microscope ID: {microscope_id}")
+
+    def _play_script_sequence(self, script_paths):
+        for script_path in script_paths:
+            self.play_script(script_path)
+
+    def _get_action_definitions(self):
+        return {
+            "grab_from_incubator": {
+                "name": "Grab from Incubator",
+                "description": "Grab a sample from the incubator",
+                "scripts": ["paths/grab_from_incubator.txt"],
+            },
+            "put_on_incubator": {
+                "name": "Put on Incubator",
+                "description": "Place a sample on the incubator",
+                "scripts": ["paths/put_on_incubator.txt"],
+            },
+            "put_on_microscope1": {
+                "name": "Put on Microscope 1",
+                "description": "Place a sample on microscope 1",
+                "scripts": ["paths/put_on_microscope1.txt"],
+            },
+            "grab_from_microscope1": {
+                "name": "Grab from Microscope 1",
+                "description": "Grab a sample from microscope 1",
+                "scripts": ["paths/grab_from_microscope1.txt"],
+            },
+            "incubator_to_microscope1": {
+                "name": "Move from Incubator to Microscope 1",
+                "description": "Grab from the incubator and place on microscope 1. The slide-rail motion is embedded in the grab/put paths.",
+                "scripts": ["paths/grab_from_incubator.txt", "paths/put_on_microscope1.txt"],
+            },
+            "microscope1_to_incubator": {
+                "name": "Move from Microscope 1 to Incubator",
+                "description": "Grab from microscope 1 and place on the incubator. The slide-rail motion is embedded in the grab/put paths.",
+                "scripts": ["paths/grab_from_microscope1.txt", "paths/put_on_incubator.txt"],
+            },
+            "put_on_squid+1": {
+                "name": "Put on Squid+1",
+                "description": "Place a sample on the squid+1 microscope",
+                "scripts": ["paths/put_on_squid+1.txt"],
+            },
+            "grab_from_squid+1": {
+                "name": "Grab from Squid+1",
+                "description": "Grab a sample from the squid+1 microscope",
+                "scripts": ["paths/grab_from_squid+1.txt"],
+            },
+        }
 
     @schema_function(skip_self=True)
     def connect(self):
@@ -254,14 +327,18 @@ class RoboticArmService:
     @schema_function(skip_self=True)
     def move_sample_from_microscope1_to_incubator(self):
         """
-        Move sample from microscope1 to incubator, the microscope need to be homed before
+        Move sample from microscope1 to incubator.
+        The slide-rail motion is embedded in the grab/put scripts.
         Returns: bool
         """
+        if not self.connected:
+            self.connect()
         self.set_motor(1)
         try:
-            if not self.simulation:
-                self.play_script("paths/microscope1_to_incubator.txt")
-            self.play_script("paths/microscope1_to_incubator.txt")
+            self._play_script_sequence((
+                "paths/grab_from_microscope1.txt",
+                "paths/put_on_incubator.txt",
+            ))
             logger.info("Sample moved from microscope1 to incubator")
             return True
         except Exception as e:
@@ -271,12 +348,18 @@ class RoboticArmService:
     @schema_function(skip_self=True)
     def move_sample_from_incubator_to_microscope1(self):
         """
-        Move sample from incubator to microscope1, microscope need to be homed before
+        Move sample from incubator to microscope1.
+        The slide-rail motion is embedded in the grab/put scripts.
         Returns: bool
         """
+        if not self.connected:
+            self.connect()
         self.set_motor(1)
         try:
-            self.play_script("paths/incubator_to_microscope1.txt")
+            self._play_script_sequence((
+                "paths/grab_from_incubator.txt",
+                "paths/put_on_microscope1.txt",
+            ))
             logger.info("Sample moved from incubator to microscope1")
             return True
         except Exception as e:
@@ -286,7 +369,7 @@ class RoboticArmService:
     @schema_function(skip_self=True)
     def grab_sample_from_microscope1(self):
         """
-        Transport a sample from microscope1 to the incubator
+        Grab a sample from microscope1
         Returns: bool
         """
         self.set_motor(1)
@@ -344,68 +427,23 @@ class RoboticArmService:
             raise e
 
     @schema_function(skip_self=True)
-    def transport_from_incubator_to_microscope1(self):
-        """
-        Transport a sample from the incubator to microscope1
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            self.play_script("paths/transport_from_incubator_to_microscope1.txt")
-            logger.info("Sample moved from incubator to microscope1")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to transport sample from incubator to microscope1: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def transport_to_incubator(self):
-        """
-        Transport a sample to the incubator (unified for all microscopes)
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            self.play_script("paths/transport_to_incubator.txt")
-            logger.info("Sample moved to incubator")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to transport sample to incubator: {e}")
-            raise e
-    
-    @schema_function(skip_self=True)
     def incubator_to_microscope(self, microscope_id=1):
         """
         Move a sample from the incubator to microscopes
+        Uses a two-step sequence: grab from incubator, then put on the microscope.
+        The long slide-rail motion is embedded in those scripts.
         Returns: bool
         """
         if not self.connected:
             self.connect()
         self.set_motor(1)
         try:
-            if microscope_id == 1:
-                self.play_script("paths/grab_from_incubator.txt")
-                self.play_script("paths/transport_from_incubator_to_microscope1.txt")
-                self.play_script("paths/put_on_microscope1.txt")
-                logger.info(f"Sample moved from incubator to microscope 1")
-            elif microscope_id == 2:
-                self.play_script("paths/grab_from_incubator.txt")
-                self.play_script("paths/transport_from_incubator_to_microscope2.txt")
-                self.play_script("paths/put_on_microscope2.txt")
-                logger.info(f"Sample moved from incubator to microscope 2")
-            elif microscope_id == 3:  # squid+1 microscope
-                self.play_script("paths/grab_from_incubator.txt")
-                self.play_script("paths/transport_from_incubator_to_squid+1.txt")
-                self.play_script("paths/put_on_squid+1.txt")
-                logger.info(f"Sample moved from incubator to squid+1 microscope")
-            else:
-                logger.error(f"Invalid microscope ID: {microscope_id}")
-                raise Exception(f"Invalid microscope ID: {microscope_id}")
-            
+            microscope = self._get_microscope_script_paths(microscope_id)
+            self._play_script_sequence((
+                "paths/grab_from_incubator.txt",
+                microscope["put"],
+            ))
+            logger.info(f"Sample moved from incubator to {microscope['label']}")
             return True
         except Exception as e:
             logger.error(f"Failed to move sample from incubator to microscope {microscope_id}: {e}")
@@ -415,31 +453,20 @@ class RoboticArmService:
     def microscope_to_incubator(self, microscope_id=1):
         """
         Move a sample from microscopes to the incubator
+        Uses a two-step sequence: grab from the microscope, then put on the incubator.
+        The long slide-rail motion is embedded in those scripts.
         Returns: bool
         """
         if not self.connected:
             self.connect()
         self.set_motor(1)
         try:
-            if microscope_id == 1:
-                self.play_script("paths/grab_from_microscope1.txt")
-                self.play_script("paths/transport_to_incubator.txt")
-                self.play_script("paths/put_on_incubator.txt")
-                logger.info(f"Sample moved from microscope 1 to incubator")
-            elif microscope_id == 2:
-                self.play_script("paths/grab_from_microscope2.txt")
-                self.play_script("paths/transport_to_incubator.txt")
-                self.play_script("paths/put_on_incubator.txt")
-                logger.info(f"Sample moved from microscope 2 to incubator")
-            elif microscope_id == 3:  # squid+1 microscope
-                self.play_script("paths/grab_from_squid+1.txt")
-                self.play_script("paths/transport_to_incubator.txt")
-                self.play_script("paths/put_on_incubator.txt")
-                logger.info(f"Sample moved from squid+1 microscope to incubator")
-            else:
-                logger.error(f"Invalid microscope ID: {microscope_id}")
-                raise Exception(f"Invalid microscope ID: {microscope_id}")
-                
+            microscope = self._get_microscope_script_paths(microscope_id)
+            self._play_script_sequence((
+                microscope["grab"],
+                "paths/put_on_incubator.txt",
+            ))
+            logger.info(f"Sample moved from {microscope['label']} to incubator")
             return True
         except Exception as e:
             logger.error(f"Failed to move sample from microscope {microscope_id} to incubator: {e}")
@@ -618,59 +645,20 @@ class RoboticArmService:
         import json
         
         actions = []
-        paths_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paths")
-        
-        # Define action mappings
-        action_mappings = {
-            "grab_from_incubator.txt": {
-                "name": "Grab from Incubator",
-                "description": "Grab a sample from the incubator",
-                "id": "grab_from_incubator"
-            },
-            "put_on_incubator.txt": {
-                "name": "Put on Incubator",
-                "description": "Place a sample on the incubator",
-                "id": "put_on_incubator"
-            },
-            "put_on_microscope1.txt": {
-                "name": "Put on Microscope 1",
-                "description": "Place a sample on microscope 1",
-                "id": "put_on_microscope1"
-            },
-            "grab_from_microscope1.txt": {
-                "name": "Grab from Microscope 1",
-                "description": "Grab a sample from microscope 1",
-                "id": "grab_from_microscope1"
-            },
-            "transport_from_incubator_to_microscope1.txt": {
-                "name": "Transport from Incubator to Microscope 1",
-                "description": "Transport a sample from the incubator to microscope 1",
-                "id": "transport_from_incubator_to_microscope1"
-            },
-            "transport_to_incubator.txt": {
-                "name": "Transport to Incubator",
-                "description": "Transport a sample to the incubator (unified for all microscopes)",
-                "id": "transport_to_incubator"
-            },
-            "incubator_to_microscope1.txt": {
-                "name": "Move from Incubator to Microscope 1",
-                "description": "Move a sample from the incubator to microscope 1 (complete sequence)",
-                "id": "incubator_to_microscope1"
-            },
-            "microscope1_to_incubator.txt": {
-                "name": "Move from Microscope 1 to Incubator",
-                "description": "Move a sample from microscope 1 to the incubator (complete sequence)",
-                "id": "microscope1_to_incubator"
-            }
-        }
-        
-        # Process each path file
-        for filename, action_info in action_mappings.items():
-            file_path = os.path.join(paths_dir, filename)
-            if os.path.exists(file_path):
-                positions = []
-                speeds = []
-                
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        for action_id, action_info in self._get_action_definitions().items():
+            positions = []
+            speeds = []
+            missing_script = False
+
+            for script_path in action_info["scripts"]:
+                file_path = os.path.join(base_dir, script_path)
+                if not os.path.exists(file_path):
+                    logger.warning(f"Skipping action {action_id}; missing script {script_path}")
+                    missing_script = True
+                    break
+
                 with open(file_path, 'r') as f:
                     for line in f:
                         line = line.strip()
@@ -678,7 +666,6 @@ class RoboticArmService:
                             try:
                                 cmd = json.loads(line)
                                 if cmd.get('cmd') == 'jmove':
-                                    # Extract position data
                                     pos = [
                                         cmd.get('j0', 0),
                                         cmd.get('j1', 0),
@@ -688,23 +675,22 @@ class RoboticArmService:
                                         cmd.get('j5', 0)
                                     ]
                                     positions.append(pos)
-                                    
-                                    # Extract speed if available, otherwise use default of 20
-                                    speed = cmd.get('vel', 20)
-                                    speeds.append(speed)
+                                    speeds.append(cmd.get('vel', 20))
                             except json.JSONDecodeError:
                                 continue
-                
-                # Create action object
-                action = {
-                    "name": action_info["name"],
-                    "description": action_info["description"],
-                    "id": action_info["id"],
-                    "positions": positions,
-                    "speeds": speeds
-                }
-                
-                actions.append(action)
+
+            if missing_script:
+                continue
+
+            action = {
+                "name": action_info["name"],
+                "description": action_info["description"],
+                "id": action_id,
+                "positions": positions,
+                "speeds": speeds
+            }
+
+            actions.append(action)
         
         return {"actions": actions}
 
@@ -716,32 +702,15 @@ class RoboticArmService:
         """
         if not self.connected:
             self.connect()
-            
-        # Map action IDs to script paths
-        action_to_script = {
-            "grab_from_incubator": "paths/grab_from_incubator.txt",
-            "put_on_incubator": "paths/put_on_incubator.txt",
-            "put_on_microscope1": "paths/put_on_microscope1.txt",
-            "grab_from_microscope1": "paths/grab_from_microscope1.txt",
-            "transport_from_incubator_to_microscope1": "paths/transport_from_incubator_to_microscope1.txt",
-            "transport_to_incubator": "paths/transport_to_incubator.txt",
-            "incubator_to_microscope1": "paths/incubator_to_microscope1.txt",
-            "microscope1_to_incubator": "paths/microscope1_to_incubator.txt",
-            "put_on_squid+1": "paths/put_on_squid+1.txt",
-            "grab_from_squid+1": "paths/grab_from_squid+1.txt",
-            "transport_from_incubator_to_squid+1": "paths/transport_from_incubator_to_squid+1.txt",
-        }
-        
-        if action_id not in action_to_script:
+
+        action_definitions = self._get_action_definitions()
+        if action_id not in action_definitions:
             logger.error(f"Unknown action ID: {action_id}")
             raise Exception("Unknown action ID")
-            
-        script_path = action_to_script[action_id]
+
         try:
             self.set_motor(1)
-            result = self.robot.play_script(script_path)
-            if result != 2:
-                raise Exception("Error playing script")
+            self._play_script_sequence(action_definitions[action_id]["scripts"])
             logger.info(f"Action {action_id} executed successfully")
             return True
         except Exception as e:

@@ -66,13 +66,7 @@ dorna-control/
 │   ├── grab_from_squid+1.txt        # Grab from squid+1 microscope
 │   ├── put_on_squid+1.txt           # Place on squid+1 microscope
 │   ├── grab_from_hamilton.txt       # Grab from Hamilton handler
-│   ├── put_on_hamilton.txt          # Place on Hamilton handler
-│   ├── transport_from_incubator_to_microscope1.txt
-│   ├── transport_from_incubator_to_microscope2.txt
-│   ├── transport_from_incubator_to_squid+1.txt
-│   ├── transport_to_incubator.txt   # Unified transport to incubator
-│   ├── incubator_to_microscope1.txt # Complete sequence
-│   └── microscope1_to_incubator.txt # Complete sequence
+│   └── put_on_hamilton.txt          # Place on Hamilton handler
 ├── dorna_controller.py              # Basic controller wrapper
 ├── start_hypha_service_robotic_arm.py  # Hypha RPC service
 ├── dorna.log                        # Robot communication log
@@ -143,7 +137,7 @@ controller.connect()
 is_busy = controller.is_busy()
 
 # Execute sample transfer
-controller.transport_from_incubator_to_microscope1()
+controller.move_sample_from_incubator_to_microscope1()
 
 # Turn on work light
 controller.light_on()
@@ -214,8 +208,8 @@ The robotic arm exposes the following methods via Hypha RPC:
 |--------|-------------|
 | `incubator_to_microscope(microscope_id)` | Complete transport from incubator to microscope (1, 2, or 3) |
 | `microscope_to_incubator(microscope_id)` | Complete transport from microscope to incubator |
-| `transport_from_incubator_to_microscope1()` | Transport from incubator to microscope 1 |
-| `transport_to_incubator()` | Transport sample to incubator (unified for all microscopes) |
+
+Microscope and Hamilton plate transfers use a two-step sequence: the source `grab_*` script followed by the destination `put_on_*` script. The required `j6` slide-rail motion is embedded in those scripts.
 
 ### Granular Operations
 
@@ -249,8 +243,10 @@ Available action IDs:
 - `put_on_incubator`
 - `grab_from_microscope1`
 - `put_on_microscope1`
-- `transport_from_incubator_to_microscope1`
-- `transport_to_incubator`
+- `incubator_to_microscope1`
+- `microscope1_to_incubator`
+- `grab_from_squid+1`
+- `put_on_squid+1`
 
 ### Calling from Python
 

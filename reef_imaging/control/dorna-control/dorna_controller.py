@@ -21,6 +21,10 @@ class DornaController:
         print("Playing script")
         self.robot.play_script(script_path)
 
+    def play_script_sequence(self, script_paths):
+        for script_path in script_paths:
+            self.play_script(script_path)
+
     def is_busy(self):
         status = self.robot.track_cmd()
         print(f"Robot status: {status}")
@@ -28,7 +32,10 @@ class DornaController:
 
     def move_sample_from_microscope1_to_incubator(self):
         self.set_motor(1)
-        self.play_script("paths/microscope1_to_incubator.txt")
+        self.play_script_sequence((
+            "paths/grab_from_microscope1.txt",
+            "paths/put_on_incubator.txt",
+        ))
     
     def grab_sample_from_microscope1(self):
         self.set_motor(1)
@@ -46,22 +53,17 @@ class DornaController:
         self.set_motor(1)
         self.play_script("paths/put_on_incubator.txt")
     
-    def transport_from_incubator_to_microscope1(self):
-        self.set_motor(1)
-        self.play_script("paths/transport_from_incubator_to_microscope1.txt")
-    
-    def transport_to_incubator(self):
-        self.set_motor(1)
-        self.play_script("paths/transport_to_incubator.txt")
-
     def move_sample_from_incubator_to_microscope1(self):
         self.set_motor(1)
-        self.play_script("paths/incubator_to_microscope1.txt")
+        self.play_script_sequence((
+            "paths/grab_from_incubator.txt",
+            "paths/put_on_microscope1.txt",
+        ))
 
     def move_plate(self, source, destination):
-        if source == "microscope" and destination == "incubator":
-            self.transport_to_incubator()
-        elif source == "incubator" and destination == "microscope1":
+        if source in {"microscope", "microscope1"} and destination == "incubator":
+            self.move_sample_from_microscope1_to_incubator()
+        elif source == "incubator" and destination in {"microscope", "microscope1"}:
             self.move_sample_from_incubator_to_microscope1()
         else:
             print(f"Invalid source-destination combination: {source} to {destination}")
