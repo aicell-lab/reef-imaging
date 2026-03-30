@@ -39,6 +39,15 @@ class HamiltonCycle:
     microscope_id: str = None  # Only used for microscope-related cycles
 
 
+@dataclass(frozen=True)
+class TransportCycle:
+    """A transport-only cycle without scanning."""
+    incubator_slot: int
+    sample_name: str
+    from_device: str  # Source device ID
+    to_device: str    # Target device ID
+
+
 def parse_slot_selection(raw_selection: str, available_slots: Iterable[int]) -> List[int]:
     available_slot_set = set(available_slots)
     tokens = [token.strip() for token in raw_selection.split(",") if token.strip()]
@@ -144,6 +153,67 @@ def build_hamilton_cycle_plan(selected_samples: Sequence[dict], test_type: str, 
     return cycles
 
 
+def build_transport_cycle_plan(selected_samples: Sequence[dict], microscopes: Sequence[str]) -> List[TransportCycle]:
+    """Build transport-only test cycles covering all device combinations.
+    
+    Tests all combinations without scanning:
+    - incubator <-> each microscope
+    - incubator <-> hamilton
+    - hamilton <-> each microscope
+    """
+    cycles = []
+    for sample in selected_samples:
+        slot = sample["incubator_slot"]
+        name = sample["name"]
+        
+        # Incubator <-> each microscope
+        for microscope_id in microscopes:
+            cycles.append(TransportCycle(
+                incubator_slot=slot,
+                sample_name=name,
+                from_device="incubator",
+                to_device=microscope_id
+            ))
+            cycles.append(TransportCycle(
+                incubator_slot=slot,
+                sample_name=name,
+                from_device=microscope_id,
+                to_device="incubator"
+            ))
+        
+        # Incubator <-> Hamilton
+        cycles.append(TransportCycle(
+            incubator_slot=slot,
+            sample_name=name,
+            from_device="incubator",
+            to_device="hamilton"
+        ))
+        cycles.append(TransportCycle(
+            incubator_slot=slot,
+            sample_name=name,
+            from_device="hamilton",
+            to_device="incubator"
+        ))
+        
+        # Hamilton <-> each microscope (uses first microscope for simplicity)
+        if microscopes:
+            microscope_id = microscopes[0]
+            cycles.append(TransportCycle(
+                incubator_slot=slot,
+                sample_name=name,
+                from_device="hamilton",
+                to_device=microscope_id
+            ))
+            cycles.append(TransportCycle(
+                incubator_slot=slot,
+                sample_name=name,
+                from_device=microscope_id,
+                to_device="hamilton"
+            ))
+    
+    return cycles
+
+
 def format_samples_table(samples: Sequence[dict]) -> str:
     headers = ["Slot", "Sample", "Location", "Status", "Plate"]
     rows = [
@@ -224,8 +294,9 @@ class HardwareSmokeTestRunner:
         self._record("  3. Hamilton only (microscope) - test microscope <-> Hamilton transport")
         self._record("  4. Hamilton full cycle - test incubator -> Hamilton -> microscope -> Hamilton -> incubator")
         self._record("  5. Combined - test microscope first, then Hamilton")
+        self._record("  6. Transportation only - test all transport combinations without scanning")
         while True:
-            response = self.input_fn("Enter choice [1-5, default=1]: ").strip()
+            response = self.input_fn("Enter choice [1-6, default=1]: ").strip()
             if response in {"", "1"}:
                 return "microscope_only"
             elif response == "2":
@@ -236,8 +307,10 @@ class HardwareSmokeTestRunner:
                 return "hamilton_full"
             elif response == "5":
                 return "combined"
+            elif response == "6":
+                return "transportation_only"
             else:
-                self._record("Invalid choice. Please enter 1-5.")
+                self._record("Invalid choice. Please enter 1-6.")
 
     def _prompt_for_slots(self, available_slots: Sequence[int]) -> List[int]:
         while True:
@@ -337,6 +410,7 @@ class HardwareSmokeTestRunner:
             self._record(f"Emergency action '{choice}' response: {response}")
 
     async def _run_cycle(self, cycle: SmokeCycle) -> dict:
+        """Run a full smoke cycle with scanning (legacy mode)."""
         action_id = f"hardware_smoke_{self.run_id}_slot{cycle.incubator_slot}_{cycle.microscope_id}"
         cycle_result = {
             "cycle": asdict(cycle),
@@ -346,9 +420,11 @@ class HardwareSmokeTestRunner:
         }
 
         try:
-            load_response = await self.orchestrator.load_plate_from_incubator_to_microscope(
-                incubator_slot=cycle.incubator_slot,
-                microscope_id=cycle.microscope_id,
+            # Use unified transport_plate API for load
+            load_response = await self.orchestrator.transport_plate(
+                from_device="incubator",
+                to_device=cycle.microscope_id,
+                slot=cycle.incubator_slot,
             )
             cycle_result["load_response"] = load_response
             if not load_response.get("success"):
@@ -365,9 +441,11 @@ class HardwareSmokeTestRunner:
                 raise RuntimeError(scan_response.get("message", "Scan failed."))
             cycle_result["last_completed_step"] = "scan"
 
-            unload_response = await self.orchestrator.unload_plate_from_microscope(
-                incubator_slot=cycle.incubator_slot,
-                microscope_id=cycle.microscope_id,
+            # Use unified transport_plate API for unload
+            unload_response = await self.orchestrator.transport_plate(
+                from_device=cycle.microscope_id,
+                to_device="incubator",
+                slot=cycle.incubator_slot,
             )
             cycle_result["unload_response"] = unload_response
             if not unload_response.get("success"):
@@ -400,6 +478,7 @@ class HardwareSmokeTestRunner:
         return sample
 
     async def _run_hamilton_cycle(self, cycle: HamiltonCycle) -> dict:
+        """Run a Hamilton transport cycle (legacy mode using unified API)."""
         action_id = f"hardware_smoke_{self.run_id}_slot{cycle.incubator_slot}_{cycle.cycle_type}"
         cycle_result = {
             "cycle": asdict(cycle),
@@ -409,55 +488,39 @@ class HardwareSmokeTestRunner:
         }
 
         try:
-            if cycle.cycle_type == "incubator_to_hamilton":
-                response = await self.orchestrator.load_plate_from_incubator_to_hamilton(
-                    incubator_slot=cycle.incubator_slot,
-                )
-                cycle_result["transport_response"] = response
-                if not response.get("success"):
-                    raise RuntimeError(response.get("message", "Load to Hamilton failed."))
+            # Map legacy cycle types to unified transport_plate API
+            route_map = {
+                "incubator_to_hamilton": ("incubator", "hamilton"),
+                "hamilton_to_incubator": ("hamilton", "incubator"),
+                "microscope_to_hamilton": (cycle.microscope_id, "hamilton"),
+                "hamilton_to_microscope": ("hamilton", cycle.microscope_id),
+            }
+            
+            from_device, to_device = route_map[cycle.cycle_type]
+            response = await self.orchestrator.transport_plate(
+                from_device=from_device,
+                to_device=to_device,
+                slot=cycle.incubator_slot,
+            )
+            cycle_result["transport_response"] = response
+            
+            if not response.get("success"):
+                raise RuntimeError(response.get("message", f"Transport {cycle.cycle_type} failed."))
+            
+            # Verify based on target
+            if cycle.cycle_type in ("incubator_to_hamilton", "microscope_to_hamilton"):
                 verification = await self._verify_sample_at_hamilton(cycle)
                 cycle_result["verification"] = verification
-                cycle_result["last_completed_step"] = "incubator_to_hamilton"
-
             elif cycle.cycle_type == "hamilton_to_incubator":
-                response = await self.orchestrator.unload_plate_from_hamilton_to_incubator(
-                    incubator_slot=cycle.incubator_slot,
-                )
-                cycle_result["transport_response"] = response
-                if not response.get("success"):
-                    raise RuntimeError(response.get("message", "Unload from Hamilton failed."))
                 verification = await self._verify_sample_returned(cycle)
                 cycle_result["verification"] = verification
-                cycle_result["last_completed_step"] = "hamilton_to_incubator"
-
-            elif cycle.cycle_type == "microscope_to_hamilton":
-                response = await self.orchestrator.transport_plate_from_microscope_to_hamilton(
-                    incubator_slot=cycle.incubator_slot,
-                    microscope_id=cycle.microscope_id,
-                )
-                cycle_result["transport_response"] = response
-                if not response.get("success"):
-                    raise RuntimeError(response.get("message", "Transport from microscope to Hamilton failed."))
-                verification = await self._verify_sample_at_hamilton(cycle)
-                cycle_result["verification"] = verification
-                cycle_result["last_completed_step"] = "microscope_to_hamilton"
-
             elif cycle.cycle_type == "hamilton_to_microscope":
-                response = await self.orchestrator.transport_plate_from_hamilton_to_microscope(
-                    incubator_slot=cycle.incubator_slot,
-                    microscope_id=cycle.microscope_id,
-                )
-                cycle_result["transport_response"] = response
-                if not response.get("success"):
-                    raise RuntimeError(response.get("message", "Transport from Hamilton to microscope failed."))
-                # For hamilton_to_microscope, verify sample is on microscope via runtime status
                 runtime_status = await self._get_runtime_status()
                 sample_flags = runtime_status.get("sample_on_microscope_flags", {})
                 if not sample_flags.get(cycle.microscope_id, False):
                     raise RuntimeError(f"Sample not detected on microscope {cycle.microscope_id} after transport.")
-                cycle_result["last_completed_step"] = "hamilton_to_microscope"
-
+            
+            cycle_result["last_completed_step"] = cycle.cycle_type
             cycle_result["status"] = "completed"
             return cycle_result
         except Exception as exc:
@@ -503,6 +566,93 @@ class HardwareSmokeTestRunner:
             self._record(
                 f"Hamilton cycle completed successfully: {cycle.cycle_type}, slot {cycle.incubator_slot}, "
                 f"action_id={cycle_result['action_id']}"
+            )
+        return summary
+
+    async def _run_transport_cycle(self, cycle: TransportCycle) -> dict:
+        """Run a transport-only cycle without scanning."""
+        action_id = f"transport_test_{self.run_id}_slot{cycle.incubator_slot}_{cycle.from_device}_to_{cycle.to_device}"
+        cycle_result = {
+            "cycle": asdict(cycle),
+            "action_id": action_id,
+            "status": "running",
+            "last_completed_step": None,
+        }
+
+        try:
+            response = await self.orchestrator.transport_plate(
+                from_device=cycle.from_device,
+                to_device=cycle.to_device,
+                slot=cycle.incubator_slot,
+            )
+            cycle_result["transport_response"] = response
+            
+            if not response.get("success"):
+                raise RuntimeError(response.get("message", f"Transport {cycle.from_device} -> {cycle.to_device} failed."))
+            
+            # Verify based on target device
+            if cycle.to_device == "incubator":
+                verification = await self._verify_sample_returned(cycle)
+                cycle_result["verification"] = verification
+            elif cycle.to_device == "hamilton":
+                # Create a temporary HamiltonCycle for verification
+                hamilton_cycle = HamiltonCycle(
+                    incubator_slot=cycle.incubator_slot,
+                    sample_name=cycle.sample_name,
+                    cycle_type="microscope_to_hamilton" if cycle.from_device.startswith("microscope") else "incubator_to_hamilton"
+                )
+                verification = await self._verify_sample_at_hamilton(hamilton_cycle)
+                cycle_result["verification"] = verification
+            elif cycle.to_device.startswith("microscope"):
+                runtime_status = await self._get_runtime_status()
+                sample_flags = runtime_status.get("sample_on_microscope_flags", {})
+                if not sample_flags.get(cycle.to_device, False):
+                    raise RuntimeError(f"Sample not detected on microscope {cycle.to_device} after transport.")
+            
+            cycle_result["last_completed_step"] = f"{cycle.from_device}_to_{cycle.to_device}"
+            cycle_result["status"] = "completed"
+            return cycle_result
+        except Exception as exc:
+            cycle_result["status"] = "failed"
+            cycle_result["error"] = str(exc)
+            cycle_result["runtime_status"] = await self._safe_runtime_status()
+            return cycle_result
+
+    async def _run_transport_cycles(self, cycles: List[TransportCycle], summary: dict) -> dict:
+        """Run transport-only test cycles."""
+        for index, cycle in enumerate(cycles, start=1):
+            if not self._confirm(
+                f"Start transport cycle {index}/{len(cycles)}: {cycle.from_device} -> {cycle.to_device} "
+                f"for slot {cycle.incubator_slot} ({cycle.sample_name})"
+            ):
+                raise OperatorAbortError(
+                    f"Operator stopped before transport cycle {index} for slot {cycle.incubator_slot}."
+                )
+
+            self._record(
+                f"Starting transport cycle {index}/{len(cycles)}: {cycle.from_device} -> {cycle.to_device}, "
+                f"slot {cycle.incubator_slot}, sample '{cycle.sample_name}'"
+            )
+            cycle_result = await self._run_transport_cycle(cycle)
+            summary["cycles"].append(cycle_result)
+            self._write_summary(summary)
+
+            if cycle_result["status"] != "completed":
+                self._record(
+                    "Transport cycle failed. "
+                    f"slot={cycle.incubator_slot}, route={cycle.from_device} -> {cycle.to_device}, "
+                    f"action_id={cycle_result['action_id']}, "
+                    f"last_completed_step={cycle_result.get('last_completed_step')}, "
+                    f"error={cycle_result.get('error')}"
+                )
+                summary["status"] = "failed"
+                summary["failure"] = cycle_result
+                self._write_summary(summary)
+                return summary
+
+            self._record(
+                f"Transport cycle completed successfully: {cycle.from_device} -> {cycle.to_device}, "
+                f"slot {cycle.incubator_slot}, action_id={cycle_result['action_id']}"
             )
         return summary
 
@@ -653,6 +803,21 @@ class HardwareSmokeTestRunner:
                     summary = await self._run_hamilton_cycles(hamilton_cycles, summary)
                     if summary.get("status") == "failed":
                         return summary
+
+            elif test_mode == "transportation_only":
+                # Run all transport combinations without scanning
+                transport_cycles = build_transport_cycle_plan(selected_samples, microscopes)
+                self._record(f"Target devices: incubator, hamilton, {', '.join(microscopes)}")
+                self._record(
+                    f"Planned transport cycles: {len(transport_cycles)} (all device combinations without scanning)"
+                )
+                self._record("Routes to test:")
+                for cycle in transport_cycles:
+                    self._record(f"  - {cycle.from_device} -> {cycle.to_device} (slot {cycle.incubator_slot})")
+                
+                summary = await self._run_transport_cycles(transport_cycles, summary)
+                if summary.get("status") == "failed":
+                    return summary
 
             summary["status"] = "completed"
             return summary

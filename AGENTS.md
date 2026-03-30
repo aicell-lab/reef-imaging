@@ -350,6 +350,7 @@ The smoke test now supports multiple test modes selected via interactive prompt:
 | 3. Hamilton only (microscope) | Tests microscope ↔ Hamilton transport |
 | 4. Hamilton full cycle | Tests incubator → Hamilton → microscope → Hamilton → incubator |
 | 5. Combined | Runs microscope tests followed by Hamilton full cycle |
+| 6. Transportation only | Tests all transport combinations without scanning |
 
 **Hamilton Test Flows:**
 - **Incubator ↔ Hamilton:** `transport_plate("incubator", "hamilton", slot=5)` → `transport_plate("hamilton", "incubator", slot=5)`
