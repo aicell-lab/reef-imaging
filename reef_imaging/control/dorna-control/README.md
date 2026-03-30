@@ -23,7 +23,7 @@ The [Dorna 2S](https://dorna.ai/blog/introducing-dorna-2s/) is a 5-DOF robotic a
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────────┐  │
 │  │Incubator│    │Scope 1  │    │Scope 2  │    │Scope 3      │  │
-│  │         │    │         │    │         │    │(squid+1)    │  │
+│  │         │    │         │    │         │    │(squid-plus-3)│  │
 │  └────┬────┘    └────┬────┘    └────┬────┘    └──────┬──────┘  │
 │       │              │              │                 │         │
 │       └──────────────┴──────────────┴─────────────────┘         │
@@ -59,12 +59,12 @@ dorna-control/
 ├── paths/                           # Motion script files
 │   ├── grab_from_incubator.txt      # Grab sample from incubator
 │   ├── put_on_incubator.txt         # Place sample on incubator
-│   ├── grab_from_microscope1.txt    # Grab from microscope 1
-│   ├── put_on_microscope1.txt       # Place on microscope 1
-│   ├── grab_from_microscope2.txt    # Grab from microscope 2
-│   ├── put_on_microscope2.txt       # Place on microscope 2
-│   ├── grab_from_squid+1.txt        # Grab from squid+1 microscope
-│   ├── put_on_squid+1.txt           # Place on squid+1 microscope
+│   ├── grab_from_squid-1.txt        # Grab from microscope 1 (squid-1)
+│   ├── put_on_squid-1.txt           # Place on microscope 1 (squid-1)
+│   ├── grab_from_squid-2.txt        # Grab from microscope 2 (squid-2)
+│   ├── put_on_squid-2.txt           # Place on microscope 2 (squid-2)
+│   ├── grab_from_squid-plus-3.txt   # Grab from microscope 3 (squid-plus-3)
+│   ├── put_on_squid-plus-3.txt      # Place on microscope 3 (squid-plus-3)
 │   ├── grab_from_hamilton.txt       # Grab from Hamilton handler
 │   └── put_on_hamilton.txt          # Place on Hamilton handler
 ├── dorna_controller.py              # Basic controller wrapper
@@ -137,7 +137,7 @@ controller.connect()
 is_busy = controller.is_busy()
 
 # Execute sample transfer
-controller.move_sample_from_incubator_to_microscope1()
+controller.transport_plate("incubator", "squid-1")
 
 # Turn on work light
 controller.light_on()
@@ -206,8 +206,7 @@ The robotic arm exposes the following methods via Hypha RPC:
 
 | Method | Description |
 |--------|-------------|
-| `incubator_to_microscope(microscope_id)` | Complete transport from incubator to microscope (1, 2, or 3) |
-| `microscope_to_incubator(microscope_id)` | Complete transport from microscope to incubator |
+| `transport_plate(from_device, to_device)` | Unified transport between any two devices |
 
 Microscope and Hamilton plate transfers use a two-step sequence: the source `grab_*` script followed by the destination `put_on_*` script. The required `j6` slide-rail motion is embedded in those scripts.
 
@@ -215,10 +214,8 @@ Microscope and Hamilton plate transfers use a two-step sequence: the source `gra
 
 | Method | Description |
 |--------|-------------|
-| `grab_sample_from_incubator()` | Grab sample from incubator |
-| `put_sample_on_incubator()` | Place sample on incubator |
-| `grab_sample_from_microscope1()` | Grab sample from microscope 1 |
-| `put_sample_on_microscope1()` | Place sample on microscope 1 |
+| `grab_from(device)` | Grab sample from a device |
+| `put_on(device)` | Place sample on a device |
 
 ### Status and Control
 
@@ -241,12 +238,14 @@ Microscope and Hamilton plate transfers use a two-step sequence: the source `gra
 Available action IDs:
 - `grab_from_incubator`
 - `put_on_incubator`
-- `grab_from_microscope1`
-- `put_on_microscope1`
-- `incubator_to_microscope1`
-- `microscope1_to_incubator`
-- `grab_from_squid+1`
-- `put_on_squid+1`
+- `grab_from_squid-1`
+- `put_on_squid-1`
+- `grab_from_squid-2`
+- `put_on_squid-2`
+- `grab_from_squid-plus-3`
+- `put_on_squid-plus-3`
+- `grab_from_hamilton`
+- `put_on_hamilton`
 
 ### Calling from Python
 
@@ -269,7 +268,7 @@ async def move_sample():
     print(result)  # "pong"
     
     # Transport sample from incubator to microscope 1
-    await robot.incubator_to_microscope(1)
+    await robot.transport_plate("incubator", "microscope-squid-1")
     
     # Get current joint positions
     joints = await robot.get_all_joints()

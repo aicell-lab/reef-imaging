@@ -103,31 +103,21 @@ class RoboticArmService:
                 "run_in_executor": True
             },
             "ping": self.ping,
-            "move_sample_from_microscope1_to_incubator": self.move_sample_from_microscope1_to_incubator,
-            "move_sample_from_incubator_to_microscope1": self.move_sample_from_incubator_to_microscope1,
-            "grab_sample_from_microscope1": self.grab_sample_from_microscope1,
-            "grab_sample_from_incubator": self.grab_sample_from_incubator,
-            "put_sample_on_microscope1": self.put_sample_on_microscope1,
-            "put_sample_on_incubator": self.put_sample_on_incubator,
+            # Unified transport API (recommended for new code)
+            "transport_plate": self.transport_plate,
+
+            # Device control
             "connect": self.connect,
             "disconnect": self.disconnect,
             "halt": self.halt,
             "get_all_joints": self.get_all_joints,
             "get_all_positions": self.get_all_positions,
-
             "set_alarm": self.set_alarm,
             "light_on": self.light_on,
             "light_off": self.light_off,
+            # Action management
             "get_actions": self.get_actions,
             "execute_action": self.execute_action,
-            # Add microscope ID functions
-            "incubator_to_microscope": self.incubator_to_microscope,
-            "microscope_to_incubator": self.microscope_to_incubator,
-            # Add Hamilton functions
-            "incubator_to_hamilton": self.incubator_to_hamilton,
-            "hamilton_to_incubator": self.hamilton_to_incubator,
-            "microscope_to_hamilton": self.microscope_to_hamilton,
-            "hamilton_to_microscope": self.hamilton_to_microscope,
         })
 
         logger.info(f"Robotic arm control service registered at workspace: {server.config.workspace}, id: {svc.id}")
@@ -155,38 +145,51 @@ class RoboticArmService:
         """Ping function for health checks"""
         return "pong"
 
+    # Maps service IDs to script file name prefixes
+    _DEVICE_SCRIPT_NAMES = {
+        "incubator": "incubator",
+        "hamilton": "hamilton",
+        "microscope-squid-1": "squid-1",
+        "microscope-squid-2": "squid-2",
+        "microscope-squid-plus-3": "squid-plus-3",
+    }
+
+    def _get_device_script_name(self, device: str) -> str:
+        """
+        Convert device service ID to script name.
+        
+        Supported device IDs:
+        - 'incubator' - The Cytomat incubator
+        - 'hamilton' - The Hamilton liquid handler  
+        - 'microscope-squid-1' - Microscope 1
+        - 'microscope-squid-2' - Microscope 2
+        - 'microscope-squid-plus-3' - Microscope 3
+        
+        Returns the script name used in path files.
+        """
+        device = str(device).lower().strip()
+        
+        # Direct lookup for known devices
+        if device in self._DEVICE_SCRIPT_NAMES:
+            return self._DEVICE_SCRIPT_NAMES[device]
+        
+        raise Exception(f"Invalid device identifier: '{device}'. Supported: {list(self._DEVICE_SCRIPT_NAMES.keys())}")
+
     def _get_microscope_script_paths(self, microscope_id):
-        try:
-            microscope_id = int(microscope_id)
-        except (TypeError, ValueError) as exc:
-            raise Exception(f"Invalid microscope ID: {microscope_id}") from exc
-
-        if microscope_id == 1:
-            return {
-                "label": "microscope 1",
-                "grab": "paths/grab_from_microscope1.txt",
-                "put": "paths/put_on_microscope1.txt",
-            }
-        if microscope_id == 2:
-            return {
-                "label": "microscope 2",
-                "grab": "paths/grab_from_microscope2.txt",
-                "put": "paths/put_on_microscope2.txt",
-            }
-        if microscope_id == 3:
-            return {
-                "label": "squid+1 microscope",
-                "grab": "paths/grab_from_squid+1.txt",
-                "put": "paths/put_on_squid+1.txt",
-            }
-
-        raise Exception(f"Invalid microscope ID: {microscope_id}")
+        """Legacy method - now uses unified device system."""
+        script_name = self._get_device_script_name(f"microscope{microscope_id}")
+        return {
+            "label": f"microscope {microscope_id}",
+            "grab": f"paths/grab_from_{script_name}.txt",
+            "put": f"paths/put_on_{script_name}.txt",
+        }
 
     def _play_script_sequence(self, script_paths):
         for script_path in script_paths:
             self.play_script(script_path)
 
     def _get_action_definitions(self):
+        """Define predefined grab/put actions for manual operations."""
         return {
             "grab_from_incubator": {
                 "name": "Grab from Incubator",
@@ -198,35 +201,45 @@ class RoboticArmService:
                 "description": "Place a sample on the incubator",
                 "scripts": ["paths/put_on_incubator.txt"],
             },
-            "put_on_microscope1": {
-                "name": "Put on Microscope 1",
-                "description": "Place a sample on microscope 1",
-                "scripts": ["paths/put_on_microscope1.txt"],
+            "grab_from_hamilton": {
+                "name": "Grab from Hamilton",
+                "description": "Grab a sample from the Hamilton",
+                "scripts": ["paths/grab_from_hamilton.txt"],
             },
-            "grab_from_microscope1": {
-                "name": "Grab from Microscope 1",
+            "put_on_hamilton": {
+                "name": "Put on Hamilton",
+                "description": "Place a sample on the Hamilton",
+                "scripts": ["paths/put_on_hamilton.txt"],
+            },
+            "grab_from_squid-1": {
+                "name": "Grab from Squid-1",
                 "description": "Grab a sample from microscope 1",
-                "scripts": ["paths/grab_from_microscope1.txt"],
+                "scripts": ["paths/grab_from_squid-1.txt"],
             },
-            "incubator_to_microscope1": {
-                "name": "Move from Incubator to Microscope 1",
-                "description": "Grab from the incubator and place on microscope 1. The slide-rail motion is embedded in the grab/put paths.",
-                "scripts": ["paths/grab_from_incubator.txt", "paths/put_on_microscope1.txt"],
+            "put_on_squid-1": {
+                "name": "Put on Squid-1",
+                "description": "Place a sample on microscope 1",
+                "scripts": ["paths/put_on_squid-1.txt"],
             },
-            "microscope1_to_incubator": {
-                "name": "Move from Microscope 1 to Incubator",
-                "description": "Grab from microscope 1 and place on the incubator. The slide-rail motion is embedded in the grab/put paths.",
-                "scripts": ["paths/grab_from_microscope1.txt", "paths/put_on_incubator.txt"],
+            "grab_from_squid-2": {
+                "name": "Grab from Squid-2",
+                "description": "Grab a sample from microscope 2",
+                "scripts": ["paths/grab_from_squid-2.txt"],
             },
-            "put_on_squid+1": {
-                "name": "Put on Squid+1",
-                "description": "Place a sample on the squid+1 microscope",
-                "scripts": ["paths/put_on_squid+1.txt"],
+            "put_on_squid-2": {
+                "name": "Put on Squid-2",
+                "description": "Place a sample on microscope 2",
+                "scripts": ["paths/put_on_squid-2.txt"],
             },
-            "grab_from_squid+1": {
-                "name": "Grab from Squid+1",
-                "description": "Grab a sample from the squid+1 microscope",
-                "scripts": ["paths/grab_from_squid+1.txt"],
+            "grab_from_squid-plus-3": {
+                "name": "Grab from Squid-plus-3",
+                "description": "Grab a sample from microscope 3",
+                "scripts": ["paths/grab_from_squid-plus-3.txt"],
+            },
+            "put_on_squid-plus-3": {
+                "name": "Put on Squid-plus-3",
+                "description": "Place a sample on microscope 3",
+                "scripts": ["paths/put_on_squid-plus-3.txt"],
             },
         }
 
@@ -324,257 +337,49 @@ class RoboticArmService:
             logger.error(f"Failed to get all positions: {e}")
             raise e
 
+
+
     @schema_function(skip_self=True)
-    def move_sample_from_microscope1_to_incubator(self):
+    def transport_plate(self, from_device: str = Field(..., description="Source device: 'incubator', 'hamilton', 'microscope-squid-1', 'microscope-squid-2', 'microscope-squid-plus-3'"), 
+                              to_device: str = Field(..., description="Target device: 'incubator', 'hamilton', 'microscope-squid-1', 'microscope-squid-2', 'microscope-squid-plus-3'")):
         """
-        Move sample from microscope1 to incubator.
-        The slide-rail motion is embedded in the grab/put scripts.
+        Unified transport API: Move a plate from any device to any other device.
+        
+        Supported device IDs:
+        - 'incubator' - The Cytomat incubator
+        - 'hamilton' - The Hamilton liquid handler
+        - 'microscope-squid-1' - Microscope 1
+        - 'microscope-squid-2' - Microscope 2
+        - 'microscope-squid-plus-3' - Microscope 3
+        
         Returns: bool
         """
+        try:
+            from_script = self._get_device_script_name(from_device)
+            to_script = self._get_device_script_name(to_device)
+        except Exception as e:
+            logger.error(f"Invalid device identifier: {e}")
+            raise e
+        
+        if from_script == to_script:
+            raise Exception(f"Cannot transport from '{from_device}' to '{to_device}': same device")
+        
         if not self.connected:
             self.connect()
         self.set_motor(1)
+        
         try:
-            self._play_script_sequence((
-                "paths/grab_from_microscope1.txt",
-                "paths/put_on_incubator.txt",
-            ))
-            logger.info("Sample moved from microscope1 to incubator")
+            grab_path = f"paths/grab_from_{from_script}.txt"
+            put_path = f"paths/put_on_{to_script}.txt"
+            
+            self._play_script_sequence((grab_path, put_path))
+            logger.info(f"Sample transported from '{from_device}' to '{to_device}'")
             return True
         except Exception as e:
-            logger.error(f"Failed to move sample from microscope1 to incubator: {e}")
+            logger.error(f"Failed to transport sample from '{from_device}' to '{to_device}': {e}")
             raise e
 
-    @schema_function(skip_self=True)
-    def move_sample_from_incubator_to_microscope1(self):
-        """
-        Move sample from incubator to microscope1.
-        The slide-rail motion is embedded in the grab/put scripts.
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            self._play_script_sequence((
-                "paths/grab_from_incubator.txt",
-                "paths/put_on_microscope1.txt",
-            ))
-            logger.info("Sample moved from incubator to microscope1")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to move sample from incubator to microscope1: {e}")
-            raise e
 
-    @schema_function(skip_self=True)
-    def grab_sample_from_microscope1(self):
-        """
-        Grab a sample from microscope1
-        Returns: bool
-        """
-        self.set_motor(1)
-        try:
-            self.play_script("paths/grab_from_microscope1.txt")
-            logger.info("Sample grabbed from microscope1")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to grab sample from microscope1: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def grab_sample_from_incubator(self):
-        """
-        Grab a sample from the incubator
-        Returns: bool
-        """
-        self.set_motor(1)
-        try:
-            self.play_script("paths/grab_from_incubator.txt")
-            logger.info("Sample grabbed from incubator")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to grab sample from incubator: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def put_sample_on_microscope1(self):
-        """
-        Place a sample on microscope1
-        Returns: bool
-        """
-        self.set_motor(1)
-        try:
-            self.play_script("paths/put_on_microscope1.txt")
-            logger.info("Sample placed on microscope1")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to put sample on microscope1: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def put_sample_on_incubator(self):
-        """
-        Place a sample on the incubator.
-        Returns: bool
-        """
-        self.set_motor(1)
-        try:
-            self.play_script("paths/put_on_incubator.txt")
-            logger.info("Sample placed on incubator")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to put sample on incubator: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def incubator_to_microscope(self, microscope_id=1):
-        """
-        Move a sample from the incubator to microscopes
-        Uses a two-step sequence: grab from incubator, then put on the microscope.
-        The long slide-rail motion is embedded in those scripts.
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            microscope = self._get_microscope_script_paths(microscope_id)
-            self._play_script_sequence((
-                "paths/grab_from_incubator.txt",
-                microscope["put"],
-            ))
-            logger.info(f"Sample moved from incubator to {microscope['label']}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to move sample from incubator to microscope {microscope_id}: {e}")
-            raise e
-    
-    @schema_function(skip_self=True)
-    def microscope_to_incubator(self, microscope_id=1):
-        """
-        Move a sample from microscopes to the incubator
-        Uses a two-step sequence: grab from the microscope, then put on the incubator.
-        The long slide-rail motion is embedded in those scripts.
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            microscope = self._get_microscope_script_paths(microscope_id)
-            self._play_script_sequence((
-                microscope["grab"],
-                "paths/put_on_incubator.txt",
-            ))
-            logger.info(f"Sample moved from {microscope['label']} to incubator")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to move sample from microscope {microscope_id} to incubator: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def incubator_to_hamilton(self):
-        """
-        Move a sample from the incubator to Hamilton.
-        Note: No separate transport file needed as j6 is set in grab/put scripts.
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            self.play_script("paths/grab_from_incubator.txt")
-            self.play_script("paths/put_on_hamilton.txt")
-            logger.info("Sample moved from incubator to Hamilton")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to move sample from incubator to Hamilton: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def hamilton_to_incubator(self):
-        """
-        Move a sample from Hamilton to the incubator.
-        Note: No separate transport file needed as j6 is set in grab/put scripts.
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            self.play_script("paths/grab_from_hamilton.txt")
-            self.play_script("paths/put_on_incubator.txt")
-            logger.info("Sample moved from Hamilton to incubator")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to move sample from Hamilton to incubator: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def microscope_to_hamilton(self, microscope_id=1):
-        """
-        Move a sample from a microscope to Hamilton.
-        Note: No separate transport file needed as j6 is set in grab/put scripts.
-        Args:
-            microscope_id: Target microscope ID (1, 2, or 3)
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            if microscope_id == 1:
-                self.play_script("paths/grab_from_microscope1.txt")
-                self.play_script("paths/put_on_hamilton.txt")
-                logger.info("Sample moved from microscope 1 to Hamilton")
-            elif microscope_id == 2:
-                self.play_script("paths/grab_from_microscope2.txt")
-                self.play_script("paths/put_on_hamilton.txt")
-                logger.info("Sample moved from microscope 2 to Hamilton")
-            elif microscope_id == 3:  # squid+1 microscope
-                self.play_script("paths/grab_from_squid+1.txt")
-                self.play_script("paths/put_on_hamilton.txt")
-                logger.info("Sample moved from squid+1 microscope to Hamilton")
-            else:
-                logger.error(f"Invalid microscope ID: {microscope_id}")
-                raise Exception(f"Invalid microscope ID: {microscope_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to move sample from microscope {microscope_id} to Hamilton: {e}")
-            raise e
-
-    @schema_function(skip_self=True)
-    def hamilton_to_microscope(self, microscope_id=1):
-        """
-        Move a sample from Hamilton to a microscope.
-        Note: No separate transport file needed as j6 is set in grab/put scripts.
-        Args:
-            microscope_id: Target microscope ID (1, 2, or 3)
-        Returns: bool
-        """
-        if not self.connected:
-            self.connect()
-        self.set_motor(1)
-        try:
-            if microscope_id == 1:
-                self.play_script("paths/grab_from_hamilton.txt")
-                self.play_script("paths/put_on_microscope1.txt")
-                logger.info("Sample moved from Hamilton to microscope 1")
-            elif microscope_id == 2:
-                self.play_script("paths/grab_from_hamilton.txt")
-                self.play_script("paths/put_on_microscope2.txt")
-                logger.info("Sample moved from Hamilton to microscope 2")
-            elif microscope_id == 3:  # squid+1 microscope
-                self.play_script("paths/grab_from_hamilton.txt")
-                self.play_script("paths/put_on_squid+1.txt")
-                logger.info("Sample moved from Hamilton to squid+1 microscope")
-            else:
-                logger.error(f"Invalid microscope ID: {microscope_id}")
-                raise Exception(f"Invalid microscope ID: {microscope_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to move sample from Hamilton to microscope {microscope_id}: {e}")
-            raise e
 
     @schema_function(skip_self=True)
     def halt(self):
