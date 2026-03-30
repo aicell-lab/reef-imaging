@@ -50,8 +50,7 @@ Simulation version for testing without hardware. Provides mock responses for all
 **Hypha service ID**: `robotic-arm-control` (hardcoded in orchestrator)
 
 **Key APIs**:
-- `incubator_to_microscope(incubator_slot)`
-- `microscope_to_incubator(incubator_slot)`
+- `transport_plate(from_device, to_device)` — Unified transport API
 - `get_status()`
 
 #### Incubator (`cytomat-control/`)
