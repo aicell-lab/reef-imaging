@@ -198,7 +198,6 @@ class OrchestrationSystem:
             # Unified transport API
             "transport_plate": self.transport_plate_api,
             # Status and monitoring
-            "get_transport_queue_status": self.get_transport_queue_status,
             "get_runtime_status": self.get_runtime_status,
             "get_incubator_samples": self.get_incubator_samples,
             "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
@@ -2467,48 +2466,6 @@ class OrchestrationSystem:
             except Exception as e:
                 logger.error(f"Failed to get all imaging tasks: {e}", exc_info=True)
                 return {"error": str(e), "success": False}
-
-    @schema_function(skip_self=True)
-    async def get_transport_queue_status(self):
-        """Returns the current busy/admission status for transport-related operations."""
-        logger.debug("Getting transport queue status")
-        try:
-            admission_snapshot = await self.admission_controller.snapshot()
-            active_operations = admission_snapshot["active_operations"]
-            current_operation = next(
-                (
-                    operation for operation in active_operations
-                    if operation["operation_type"].startswith("manual-")
-                    or operation["operation_type"].startswith("transport-")
-                ),
-                None,
-            )
-
-            sample_on_flags_per_microscope = {}
-            for mic_id in self.configured_microscopes_info.keys():
-                sample_on_flags_per_microscope[mic_id] = self.sample_on_microscope_flags.get(mic_id, False)
-
-            status_info = {
-                "mode": "reject_when_busy",
-                "queue_enabled": False,
-                "queue_size": 0,
-                "current_operation": current_operation,
-                "worker_running": False,
-                "worker_detailed_status": "disabled",
-                "active_operations": active_operations,
-                "held_resources": admission_snapshot["held_resources"],
-                "sample_on_microscope_flags": sample_on_flags_per_microscope,
-                "connected_microscopes": list(self.microscope_services.keys()),
-                "active_task": self.active_task_name,
-                "active_tasks": sorted(self._active_task_names),
-            }
-
-            logger.debug(f"Transport queue status: {status_info}")
-            return status_info
-
-        except Exception as e:
-            logger.error(f"Failed to get transport queue status: {e}", exc_info=True)
-            return {"error": str(e), "success": False}
 
     @schema_function(skip_self=True)
     async def get_runtime_status(self):

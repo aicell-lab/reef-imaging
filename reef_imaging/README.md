@@ -27,7 +27,6 @@ The main orchestration engine that coordinates all hardware and manages time-lap
 - `delete_imaging_task(task_name)` — remove a task
 - `pause_imaging_task(task_name)` / `resume_imaging_task(task_name)` — pause/resume scheduling
 - `get_all_imaging_tasks()` — list all tasks from `config.json`
-- `get_transport_queue_status()` — current busy/admission state for transport operations
 - `get_runtime_status()` — active operations, held resources, connected devices, critical services
 - `get_incubator_samples()` — slot metadata for operator-side sample selection
 - `cancel_microscope_scan()` / `halt_robotic_arm()` — emergency operator controls

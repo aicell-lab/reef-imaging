@@ -191,7 +191,6 @@ The orchestrator exposes the following Hypha service methods:
 | `pause_imaging_task(task_name)` | Pause a task |
 | `resume_imaging_task(task_name)` | Resume a paused task |
 | `get_all_imaging_tasks()` | Get all task configurations |
-| `get_transport_queue_status()` | Get transport operation status |
 | `get_runtime_status()` | Get full runtime snapshot |
 | `get_incubator_samples(slot, only_available)` | Get sample metadata from incubator |
 | `cancel_microscope_scan(microscope_id)` | Emergency scan cancellation |
