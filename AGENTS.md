@@ -199,17 +199,36 @@ The orchestrator exposes the following Hypha service methods:
 | `scan_microscope_only(microscope_id, scan_config)` | Run scan without load/unload |
 | `process_timelapse_offline(experiment_id)` | Offline stitching and upload |
 | `get_lab_video_stream_urls()` | Get camera stream URLs |
-| `load_plate_from_incubator_to_microscope(incubator_slot, microscope_id)` | Load plate to microscope |
-| `unload_plate_from_microscope(incubator_slot, microscope_id)` | Unload plate from microscope |
-| `load_plate_from_incubator_to_hamilton(incubator_slot)` | **Load plate to Hamilton** |
-| `unload_plate_from_hamilton_to_incubator(incubator_slot)` | **Unload plate from Hamilton** |
-| `transport_plate_from_microscope_to_hamilton(incubator_slot, microscope_id)` | **Transport plate from microscope to Hamilton** |
-| `transport_plate_from_hamilton_to_microscope(incubator_slot, microscope_id)` | **Transport plate from Hamilton to microscope** |
+| `transport_plate(from_device, to_device, slot)` | **Unified transport API** |
 
-**Hamilton Transport:**
-Unlike microscope transport which requires 3 steps (grab → transport → put), Hamilton transport only needs 2 steps because the slide rail position (j6) is set within the grab/put path files:
-- **To Hamilton:** `grab_from_incubator` → `put_on_hamilton`
-- **From Hamilton:** `grab_from_hamilton` → `put_on_incubator`
+**Unified Transport API:**
+The `transport_plate()` method provides a single interface for all plate transport operations.
+
+```python
+# Transport between devices (slot identifies which plate when incubator involved)
+await transport_plate("incubator", "microscope-squid-1", slot=5)
+await transport_plate("microscope-squid-1", "incubator", slot=5)
+await transport_plate("incubator", "hamilton", slot=5)
+await transport_plate("hamilton", "microscope-squid-2", slot=5)
+await transport_plate("microscope-squid-1", "hamilton", slot=5)
+```
+
+**Parameters:**
+- `from_device`: Source device service ID (`'incubator'`, `'hamilton'`, or microscope ID)
+- `to_device`: Target device service ID (`'incubator'`, `'hamilton'`, or microscope ID)
+- `slot`: Incubator slot number (1-42), required when incubator is involved
+
+**Supported device IDs:**
+- `'incubator'` - The Cytomat incubator
+- `'hamilton'` - The Hamilton liquid handler
+- `'microscope-squid-1'` - Microscope 1
+- `'microscope-squid-2'` - Microscope 2
+- `'microscope-squid-plus-3'` - Microscope 3
+
+**Robotic Arm Service API:**
+```python
+await robotic_arm.transport_plate(from_device="incubator", to_device="microscope-squid-1")
+```
 
 ### Microscope Busy-State Management
 
@@ -331,11 +350,12 @@ The smoke test now supports multiple test modes selected via interactive prompt:
 | 3. Hamilton only (microscope) | Tests microscope ↔ Hamilton transport |
 | 4. Hamilton full cycle | Tests incubator → Hamilton → microscope → Hamilton → incubator |
 | 5. Combined | Runs microscope tests followed by Hamilton full cycle |
+| 6. Transportation only | Tests all transport combinations without scanning |
 
 **Hamilton Test Flows:**
-- **Incubator ↔ Hamilton:** `load_plate_from_incubator_to_hamilton` → `unload_plate_from_hamilton_to_incubator`
-- **Microscope ↔ Hamilton:** `transport_plate_from_hamilton_to_microscope` → `transport_plate_from_microscope_to_hamilton`
-- **Full cycle:** Incubator → Hamilton → Microscope → Hamilton → Incubator
+- **Incubator ↔ Hamilton:** `transport_plate("incubator", "hamilton", slot=5)` → `transport_plate("hamilton", "incubator", slot=5)`
+- **Microscope ↔ Hamilton:** `transport_plate("hamilton", "microscope-squid-1", slot=5)` → `transport_plate("microscope-squid-1", "hamilton", slot=5)`
+- **Full cycle:** Incubator(slot 5) → Hamilton → Microscope(squid-1) → Hamilton → Incubator(slot 5)
 
 ### Start Hardware Services
 ```bash

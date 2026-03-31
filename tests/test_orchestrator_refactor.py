@@ -87,7 +87,7 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
         )
         lease = await orchestrator.admission_controller.try_acquire(request)
 
-        response = await orchestrator.load_plate_from_incubator_to_microscope_api(1, "microscope-squid-1")
+        response = await orchestrator.transport_plate_api("incubator", "microscope-squid-1", slot=1)
 
         self.assertFalse(response["success"])
         self.assertEqual(response["state"], "busy")

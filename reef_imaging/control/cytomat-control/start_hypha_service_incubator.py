@@ -367,7 +367,7 @@ class IncubatorService:
 
     @schema_function(skip_self=True)
     def update_sample_location(self, slot: int = Field(5, description="Slot number, range: 1-42"), 
-                              location: str = Field("incubator_slot", description="Current location of the sample: incubator_slot, incubator_station, robotic_arm, microscope1, microscope2")):
+                              location: str = Field("incubator_slot", description="Current location of the sample: incubator_slot, incubator_station, robotic_arm, microscope-squid-1, microscope-squid-2, microscope-squid-plus-3")):
         """Update the location of a sample in the incubator"""
 
         try:
