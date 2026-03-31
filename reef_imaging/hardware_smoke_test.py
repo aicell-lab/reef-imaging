@@ -154,38 +154,37 @@ def build_hamilton_cycle_plan(selected_samples: Sequence[dict], test_type: str, 
 
 
 def build_transport_cycle_plan(selected_samples: Sequence[dict], microscopes: Sequence[str]) -> List[TransportCycle]:
-    """Build transport-only test cycles covering all device combinations.
+    """Build transport-only test cycles as a single chain through all devices.
     
-    Tests all combinations without scanning:
-    - incubator <-> each microscope
-    - incubator <-> hamilton
-    - hamilton <-> each microscope
+    Tests transport by moving a plate through all devices in sequence:
+    incubator -> microscope-squid-1 -> microscope-squid-2 -> microscope-squid-plus-3 -> hamilton -> incubator
+    
+    This ensures the plate is always at the expected location for each transport operation.
     """
     cycles = []
     for sample in selected_samples:
         slot = sample["incubator_slot"]
         name = sample["name"]
         
-        # Incubator <-> each microscope
+        # Build a single chain through all devices
+        # Start from incubator
+        current_location = "incubator"
+        
+        # Go to each microscope in order
         for microscope_id in microscopes:
             cycles.append(TransportCycle(
                 incubator_slot=slot,
                 sample_name=name,
-                from_device="incubator",
+                from_device=current_location,
                 to_device=microscope_id
             ))
-            cycles.append(TransportCycle(
-                incubator_slot=slot,
-                sample_name=name,
-                from_device=microscope_id,
-                to_device="incubator"
-            ))
+            current_location = microscope_id
         
-        # Incubator <-> Hamilton
+        # Finally go to hamilton and back to incubator
         cycles.append(TransportCycle(
             incubator_slot=slot,
             sample_name=name,
-            from_device="incubator",
+            from_device=current_location,
             to_device="hamilton"
         ))
         cycles.append(TransportCycle(
@@ -194,22 +193,6 @@ def build_transport_cycle_plan(selected_samples: Sequence[dict], microscopes: Se
             from_device="hamilton",
             to_device="incubator"
         ))
-        
-        # Hamilton <-> each microscope (uses first microscope for simplicity)
-        if microscopes:
-            microscope_id = microscopes[0]
-            cycles.append(TransportCycle(
-                incubator_slot=slot,
-                sample_name=name,
-                from_device="hamilton",
-                to_device=microscope_id
-            ))
-            cycles.append(TransportCycle(
-                incubator_slot=slot,
-                sample_name=name,
-                from_device=microscope_id,
-                to_device="hamilton"
-            ))
     
     return cycles
 
@@ -294,7 +277,7 @@ class HardwareSmokeTestRunner:
         self._record("  3. Hamilton only (microscope) - test microscope <-> Hamilton transport")
         self._record("  4. Hamilton full cycle - test incubator -> Hamilton -> microscope -> Hamilton -> incubator")
         self._record("  5. Combined - test microscope first, then Hamilton")
-        self._record("  6. Transportation only - test all transport combinations without scanning")
+        self._record("  6. Transportation only - test transport chain through all devices without scanning")
         while True:
             response = self.input_fn("Enter choice [1-6, default=1]: ").strip()
             if response in {"", "1"}:
@@ -805,15 +788,15 @@ class HardwareSmokeTestRunner:
                         return summary
 
             elif test_mode == "transportation_only":
-                # Run all transport combinations without scanning
+                # Run transport chain through all devices without scanning
                 transport_cycles = build_transport_cycle_plan(selected_samples, microscopes)
                 self._record(f"Target devices: incubator, hamilton, {', '.join(microscopes)}")
                 self._record(
-                    f"Planned transport cycles: {len(transport_cycles)} (all device combinations without scanning)"
+                    f"Planned transport cycles: {len(transport_cycles)} (single chain through all devices)"
                 )
-                self._record("Routes to test:")
-                for cycle in transport_cycles:
-                    self._record(f"  - {cycle.from_device} -> {cycle.to_device} (slot {cycle.incubator_slot})")
+                self._record("Transport chain:")
+                for i, cycle in enumerate(transport_cycles, 1):
+                    self._record(f"  {i}. {cycle.from_device} -> {cycle.to_device} (slot {cycle.incubator_slot})")
                 
                 summary = await self._run_transport_cycles(transport_cycles, summary)
                 if summary.get("status") == "failed":

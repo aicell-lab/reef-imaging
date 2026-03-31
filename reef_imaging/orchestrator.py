@@ -99,18 +99,6 @@ class OrchestrationSystem:
         # Track exactly which services are in a critical section to avoid unrelated shutdowns
         self.critical_services = set()  # set of tuples: (service_type, service_identifier)
 
-    def _get_robot_microscope_id(self, microscope_id_str: str) -> int:
-        """Map microscope service ID to robot arm target ID (1, 2, or 3)."""
-        if 'squid-plus-3' in microscope_id_str:
-            return 3
-        elif microscope_id_str.endswith('2'):
-            return 2
-        elif microscope_id_str.endswith('1'):
-            return 1
-        else:
-            logger.warning(f"Could not determine robot target ID for microscope {microscope_id_str}, defaulting to 1.")
-            return 1
-
     def _mark_critical_services(self, service_types: list):
         """Mark services as being in a critical operation."""
         for service_type, service_id in service_types:
@@ -979,6 +967,8 @@ class OrchestrationSystem:
                 return await self._microscope_to_hamilton_api_wrapper(slot, from_device)
             elif from_device == "hamilton" and to_device.startswith("microscope-"):
                 return await self._hamilton_to_microscope_api_wrapper(slot, to_device)
+            elif from_device.startswith("microscope-") and to_device.startswith("microscope-"):
+                return await self._microscope_to_microscope_api_wrapper(slot, from_device, to_device)
             else:
                 return {"success": False, "message": f"Unsupported route: '{from_device}' -> '{to_device}'"}
         except Exception as e:
@@ -1018,10 +1008,9 @@ class OrchestrationSystem:
         # Verify actual sample location from incubator service (source of truth)
         # This protects against stale in-memory flags after a crash/restart
         try:
-            robot_target_for_check = self._get_robot_microscope_id(microscope_id_str)
             actual_location = await self.incubator.get_sample_location(incubator_slot)
             logger.info(f"Incubator reports sample location for slot {incubator_slot}: {actual_location}")
-            if actual_location == f"microscope{robot_target_for_check}":
+            if actual_location == microscope_id_str:
                 self.sample_on_microscope_flags[microscope_id_str] = True
                 logger.info(f"Sample already on microscope {microscope_id_str} per incubator. Skipping load.")
                 return
@@ -1048,8 +1037,6 @@ class OrchestrationSystem:
         self._mark_critical_services(critical_services)
         
         try:
-            robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
-
             # Start parallel operations: prepare incubator and home the stage
             await asyncio.gather(
                 self.incubator.get_sample_from_slot_to_transfer_station(incubator_slot),
@@ -1062,7 +1049,7 @@ class OrchestrationSystem:
             
             # Return microscope stage and update location
             await asyncio.gather(
-                self.incubator.update_sample_location(incubator_slot, f"microscope{robot_microscope_target_id}"),
+                self.incubator.update_sample_location(incubator_slot, microscope_id_str),
                 target_microscope_service.return_stage()
             )
             
@@ -1103,6 +1090,81 @@ class OrchestrationSystem:
             return self._busy_response(f"Unload request rejected - orchestrator is busy.", busy_error)
         except Exception as e:
             logger.error(f"Unload operation failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    async def _microscope_to_microscope_api_wrapper(self, slot: int, from_microscope: str, to_microscope: str):
+        """Internal wrapper for microscope -> microscope transport."""
+        if from_microscope not in self.configured_microscopes_info:
+            return {"success": False, "message": f"Source microscope ID '{from_microscope}' not found in configured microscopes."}
+        if to_microscope not in self.configured_microscopes_info:
+            return {"success": False, "message": f"Target microscope ID '{to_microscope}' not found in configured microscopes."}
+        if from_microscope == to_microscope:
+            return {"success": False, "message": f"Source and target microscope cannot be the same: '{from_microscope}'"}
+        
+        from_service = self.microscope_services.get(from_microscope)
+        to_service = self.microscope_services.get(to_microscope)
+        
+        # Verify sample is on the source microscope
+        try:
+            actual_location = await self.incubator.get_sample_location(slot)
+            logger.info(f"Actual sample location for slot {slot}: {actual_location}")
+            if actual_location != from_microscope:
+                return {"success": False, "message": f"Sample not on source microscope {from_microscope}, current location: {actual_location}"}
+        except Exception as e:
+            logger.warning(f"Could not verify sample location from incubator for slot {slot}: {e}. Proceeding anyway.")
+        
+        if not self.sample_on_microscope_flags.get(from_microscope, False):
+            return {"success": False, "message": f"Sample plate not on microscope {from_microscope} according to flags"}
+        
+        try:
+            logger.info(f"Microscope-to-microscope: Moving plate from {from_microscope} to {to_microscope}")
+            
+            # Mark critical operation
+            self.in_critical_operation = True
+            logger.info("CRITICAL OPERATION START: Robotic arm microscope-to-microscope transport")
+            critical_services = [
+                ('robotic_arm', self.robotic_arm_id),
+                ('microscope', from_microscope),
+                ('microscope', to_microscope),
+            ]
+            self._mark_critical_services(critical_services)
+            
+            try:
+                # Home stages on both microscopes
+                await asyncio.gather(
+                    from_service.home_stage(),
+                    to_service.home_stage(),
+                )
+                
+                # Update location to robotic arm
+                await self.incubator.update_sample_location(slot, "robotic_arm")
+                
+                # Direct transport: grab from microscope 1, put on microscope 2
+                await self.robotic_arm.transport_plate(from_device=from_microscope, to_device=to_microscope)
+                
+                # Return stages and update location
+                await asyncio.gather(
+                    from_service.return_stage(),
+                    to_service.return_stage(),
+                )
+                await self.incubator.update_sample_location(slot, to_microscope)
+                
+                # Update flags
+                self.sample_on_microscope_flags[from_microscope] = False
+                self.sample_on_microscope_flags[to_microscope] = True
+                
+                logger.info(f"Plate moved from {from_microscope} to {to_microscope}")
+                
+            finally:
+                self.in_critical_operation = False
+                logger.info("CRITICAL OPERATION END: Robotic arm microscope-to-microscope transport complete")
+                self._unmark_critical_services(critical_services)
+            
+            return {"success": True, "message": f"Transport from {from_microscope} to {to_microscope} completed."}
+        except ResourceBusyError as busy_error:
+            return self._busy_response(f"Microscope-to-microscope transport request rejected - orchestrator is busy.", busy_error)
+        except Exception as e:
+            logger.error(f"Microscope-to-microscope transport failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     async def _execute_load_to_hamilton_operation(
@@ -1315,15 +1377,12 @@ class OrchestrationSystem:
         if not target_microscope_service:
             raise Exception(f"Microscope service {microscope_id_str} is not connected.")
 
-        robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
-
         # Verify sample is on the microscope
         try:
             actual_location = await self.incubator.get_sample_location(incubator_slot)
             logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
 
-            expected_microscope_location = f"microscope{robot_microscope_target_id}"
-            if actual_location != expected_microscope_location:
+            if actual_location != microscope_id_str:
                 logger.warning(f"Sample not on microscope {microscope_id_str}, location: {actual_location}")
                 return
         except Exception as e:
@@ -1403,8 +1462,6 @@ class OrchestrationSystem:
         if not target_microscope_service:
             raise Exception(f"Microscope service {microscope_id_str} is not connected.")
 
-        robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
-
         # Verify sample is at Hamilton
         try:
             actual_location = await self.incubator.get_sample_location(incubator_slot)
@@ -1444,7 +1501,7 @@ class OrchestrationSystem:
             # Return stage and update location
             await asyncio.gather(
                 target_microscope_service.return_stage(),
-                self.incubator.update_sample_location(incubator_slot, f"microscope{robot_microscope_target_id}")
+                self.incubator.update_sample_location(incubator_slot, microscope_id_str)
             )
 
             self.sample_on_microscope_flags[microscope_id_str] = True
@@ -1538,15 +1595,12 @@ class OrchestrationSystem:
         if not target_microscope_service:
             raise Exception(f"Microscope service {microscope_id_str} is not connected.")
 
-        robot_microscope_target_id = self._get_robot_microscope_id(microscope_id_str)
-
         # Verify sample location from incubator service
         try:
             actual_location = await self.incubator.get_sample_location(incubator_slot)
             logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
             
-            expected_microscope_location = f"microscope{robot_microscope_target_id}"
-            if actual_location == expected_microscope_location:
+            if actual_location == microscope_id_str:
                 self.sample_on_microscope_flags[microscope_id_str] = True
                 logger.info(f"Updated sample_on_microscope_flags[{microscope_id_str}] to True based on incubator location")
             elif actual_location == "incubator_slot":
