@@ -247,6 +247,7 @@ class RoboticArmService:
     def connect(self):
         """
         Connect and occupy the robot, so that it can be controlled.
+        Automatically disables alarm if active (hardware safety reset).
         Returns: bool
         """
         try:
@@ -254,6 +255,20 @@ class RoboticArmService:
                 self.robot.connect(self.ip)
             self.connected = True
             logger.info("Connected to robot")
+            
+            # Disable alarm if active (hardware safety reset on service restart)
+            if not self.simulation:
+                try:
+                    alarm_status = self.robot.get_alarm()
+                    if alarm_status:
+                        logger.info("Alarm is active, disabling alarm...")
+                        self.robot.set_alarm(0)
+                        logger.info("Alarm disabled successfully")
+                    else:
+                        logger.info("Alarm is already disabled")
+                except Exception as alarm_e:
+                    logger.warning(f"Could not check/disable alarm: {alarm_e}")
+            
             return True
         except Exception as e:
             logger.error(f"Failed to connect: {e}")
@@ -292,7 +307,15 @@ class RoboticArmService:
         if not self.simulation:
             result = self.robot.play_script(script_path)
             if result != 2:
-                raise Exception("Error playing script")
+                # Get additional diagnostic info
+                try:
+                    alarm_status = self.robot.get_alarm()
+                    motor_status = self.robot.get_motor()
+                    stat = self.robot.stat()
+                    diag_info = f"alarm={alarm_status}, motor={motor_status}, stat={stat}"
+                except:
+                    diag_info = "could not retrieve diagnostic info"
+                raise Exception(f"Error playing script '{script_path}': result={result} (expected 2), {diag_info}")
             else:
                 return "Script played"
         else:
