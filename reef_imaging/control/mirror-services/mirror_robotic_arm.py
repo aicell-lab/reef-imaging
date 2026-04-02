@@ -4,6 +4,7 @@ import logging.handlers
 import time
 import argparse
 import asyncio
+import signal
 import traceback
 import dotenv
 from hypha_rpc import login, connect_to_server
@@ -55,6 +56,8 @@ class MirrorRoboticArmService:
         
         # Store dynamically created mirror methods
         self.mirrored_methods = {}
+        self.shutdown_event = asyncio.Event()
+        self._background_tasks = []
 
     async def connect_to_local_service(self):
         """Connect to the local robotic arm service"""
@@ -262,6 +265,40 @@ class MirrorRoboticArmService:
             
             await asyncio.sleep(10)  # Check every half minute
 
+    async def shutdown(self):
+        """Gracefully shut down the mirror robotic arm service."""
+        logger.info("Shutdown signal received, cleaning up...")
+        
+        for task in self._background_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        
+        await self.cleanup_cloud_service()
+        
+        if self.cloud_server:
+            try:
+                await self.cloud_server.disconnect()
+                logger.info("Disconnected from cloud server")
+            except Exception as e:
+                logger.error(f"Error disconnecting from cloud server: {e}")
+        
+        if self.local_server:
+            try:
+                await self.local_server.disconnect()
+                logger.info("Disconnected from local server")
+            except Exception as e:
+                logger.error(f"Error disconnecting from local server: {e}")
+        
+        self.cloud_server = None
+        self.local_server = None
+        self.local_service = None
+        self.shutdown_event.set()
+        logger.info("Mirror robotic arm service shutdown complete")
+
     async def start_hypha_service(self, server):
         """Start the Hypha service with dynamically mirrored methods"""
         self.cloud_server = server
@@ -356,9 +393,17 @@ if __name__ == "__main__":
             mirror_service.setup_task = asyncio.create_task(mirror_service.setup())
             await mirror_service.setup_task
             # Start the health check task after setup is complete
-            asyncio.create_task(mirror_service.check_service_health())
+            hc_task = asyncio.create_task(mirror_service.check_service_health())
+            mirror_service._background_tasks.append(hc_task)
+            await mirror_service.shutdown_event.wait()
         except Exception:
             traceback.print_exc()
+            raise
 
-    loop.create_task(main())
-    loop.run_forever() 
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(mirror_service.shutdown()))
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()

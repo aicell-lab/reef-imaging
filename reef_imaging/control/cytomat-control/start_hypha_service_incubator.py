@@ -1,6 +1,7 @@
 import asyncio
 import argparse
 import os
+import signal
 from hypha_rpc import connect_to_server, login
 from cytomat import Cytomat
 from pydantic import Field
@@ -74,6 +75,8 @@ class IncubatorService:
         self.server = None
         self.service_id = "incubator-control" + ("-simulation" if simulation else "")
         self.setup_task = None
+        self.shutdown_event = asyncio.Event()
+        self._background_tasks = []
 
     async def check_service_health(self):
         """Check if the service is healthy and rerun setup if needed"""
@@ -119,6 +122,35 @@ class IncubatorService:
                         await asyncio.sleep(30)  # Wait before retrying
             
             await asyncio.sleep(30)  # Check every half minute
+
+    async def shutdown(self):
+        """Gracefully shut down the incubator service."""
+        logger.info("Shutdown signal received, cleaning up...")
+        
+        for task in self._background_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        
+        if self.server:
+            try:
+                await self.server.disconnect()
+                logger.info("Disconnected from Hypha server")
+            except Exception as e:
+                logger.error(f"Error disconnecting from Hypha server: {e}")
+        
+        if self.c and hasattr(self.c, 'close'):
+            try:
+                self.c.close()
+                logger.info("Closed Cytomat connection")
+            except Exception as e:
+                logger.error(f"Error closing Cytomat connection: {e}")
+        
+        self.shutdown_event.set()
+        logger.info("Incubator service shutdown complete")
 
     async def start_hypha_service(self, server):
         self.server = server
@@ -641,9 +673,15 @@ if __name__ == "__main__":
         try:
             incubator_service.setup_task = asyncio.create_task(incubator_service.setup())
             await incubator_service.setup_task
+            await incubator_service.shutdown_event.wait()
         except Exception as e:
             logger.error(f"Error setting up incubator service: {e}")
             raise e
 
-    loop.create_task(main())
-    loop.run_forever()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(incubator_service.shutdown()))
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()

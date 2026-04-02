@@ -1,6 +1,7 @@
 import asyncio
 import argparse
 import os
+import signal
 from hypha_rpc import connect_to_server, login
 from dorna2 import Dorna
 import dotenv
@@ -47,6 +48,8 @@ class RoboticArmService:
         self.server = None
         self.service_id = "robotic-arm-control" + ("-simulation" if simulation else "")
         self.setup_task = None
+        self.shutdown_event = asyncio.Event()
+        self._background_tasks = []
 
 
     async def check_service_health(self):
@@ -92,6 +95,36 @@ class RoboticArmService:
                         await asyncio.sleep(30)  # Wait before retrying
             
             await asyncio.sleep(30)  # Check every half minute
+
+    async def shutdown(self):
+        """Gracefully shut down the robotic arm service."""
+        logger.info("Shutdown signal received, cleaning up...")
+        
+        for task in self._background_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        
+        if self.connected and self.robot:
+            try:
+                self.robot.close()
+                self.connected = False
+                logger.info("Disconnected from robot")
+            except Exception as e:
+                logger.error(f"Error disconnecting from robot: {e}")
+        
+        if self.server:
+            try:
+                await self.server.disconnect()
+                logger.info("Disconnected from Hypha server")
+            except Exception as e:
+                logger.error(f"Error disconnecting from Hypha server: {e}")
+        
+        self.shutdown_event.set()
+        logger.info("Robotic arm service shutdown complete")
 
     async def start_hypha_service(self, server):
         self.server = server
@@ -561,10 +594,18 @@ if __name__ == "__main__":
             await robotic_arm_service.setup_task
             
             # Start the health check task after setup is complete
-            asyncio.create_task(robotic_arm_service.check_service_health())
+            hc_task = asyncio.create_task(robotic_arm_service.check_service_health())
+            robotic_arm_service._background_tasks.append(hc_task)
+            
+            await robotic_arm_service.shutdown_event.wait()
         except Exception as e:
             logger.error(f"Error setting up robotic arm service: {e}")
             raise e
 
-    loop.create_task(main())
-    loop.run_forever()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(robotic_arm_service.shutdown()))
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
