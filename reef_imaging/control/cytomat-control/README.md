@@ -50,10 +50,18 @@ inventory metadata.
 | 13 | Heating or CO2 communication disrupted |
 | 255 | Critical |
 
+## Prerequisites
+
+- **Conda Environment**: The incubator control requires the `cytomat-env` conda environment which has the `cytomat` library installed.
+  ```bash
+  conda activate cytomat-env
+  ```
+
 ## Running
 
 **Standard**:
 ```bash
+conda activate cytomat-env
 cd reef_imaging/control/cytomat-control
 python start_hypha_service_incubator.py
 ```

@@ -63,6 +63,13 @@ The Cytomat incubator control service manages sample storage and environmental c
   - Sample status tracking
   - Error handling and recovery
 
+- **Conda Environment:** Uses `cytomat-env` (contains the `cytomat` library)
+  ```bash
+  conda activate cytomat-env
+  cd cytomat-control
+  python start_hypha_service_incubator.py --local
+  ```
+
 - **Main Files:**
   - `start_hypha_service_incubator.py` - Hypha service interface
   - `samples.json` - Sample metadata and status tracking
