@@ -28,7 +28,6 @@ The main orchestration engine that coordinates all hardware and manages time-lap
 - `pause_imaging_task(task_name)` / `resume_imaging_task(task_name)` — pause/resume scheduling
 - `get_all_imaging_tasks()` — list all tasks from `config.json`
 - `get_runtime_status()` — active operations, held resources, connected devices, critical services
-- `get_incubator_samples()` — slot metadata for operator-side sample selection
 - `cancel_microscope_scan()` / `halt_robotic_arm()` — emergency operator controls
 - `get_lab_video_stream_urls()` — public Hypha URLs for all camera feeds
 - `process_timelapse_offline_api(experiment_id)` — offline stitch + upload
@@ -63,6 +62,7 @@ Simulation version for testing without hardware. Provides mock responses for all
 **Key APIs**:
 - `put_sample_from_transfer_station_to_slot(slot_id, sample_info)`
 - `get_sample_from_slot_to_transfer_station(slot_id)`
+- `get_incubator_samples(slot_id)` — canonical sample metadata owned by the incubator service
 - `get_status()` — system health and current operations
 - `get_temperature()` / `get_co2_level()`
 - `add_sample(slot_id, sample_info)` / `remove_sample(slot_id)`
@@ -200,7 +200,7 @@ Run it only after the local hardware services and the orchestrator are already r
 reef-hardware-smoke-test
 ```
 
-The tool connects to the running local orchestrator, lists available incubator samples, lets the user pick 1 to 5 samples, asks for confirmation before each cycle, stops on the first failure, and writes a timestamped report under `hardware_test_reports/`.
+The tool connects to the running local orchestrator and incubator services, lists available incubator samples, lets the user pick 1 to 5 samples, asks for confirmation before each cycle, stops on the first failure, and writes a timestamped report under `hardware_test_reports/`.
 
 ### Starting Hardware Services
 

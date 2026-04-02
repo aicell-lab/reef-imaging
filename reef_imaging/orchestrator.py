@@ -199,7 +199,6 @@ class OrchestrationSystem:
             "transport_plate": self.transport_plate_api,
             # Status and monitoring
             "get_runtime_status": self.get_runtime_status,
-            "get_incubator_samples": self.get_incubator_samples,
             "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
             # Emergency controls
             "cancel_microscope_scan": self.cancel_microscope_scan,
@@ -2533,51 +2532,6 @@ class OrchestrationSystem:
         except Exception as e:
             logger.error(f"Failed to get runtime status: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
-
-    @schema_function(skip_self=True)
-    async def get_incubator_samples(self, slot: int = None, only_available: bool = False):
-        """Return incubator sample metadata for the lab smoke-test picker."""
-        try:
-            if not self.incubator:
-                setup_ok = await self.setup_connections()
-                if not setup_ok or not self.incubator:
-                    raise Exception("Incubator service is not available.")
-
-            sample_payload = await self.incubator.get_slot_information(slot)
-            if sample_payload is None:
-                sample_records = []
-            elif isinstance(sample_payload, list):
-                sample_records = sample_payload
-            else:
-                sample_records = [sample_payload]
-
-            normalized_samples = []
-            for sample in sample_records:
-                sample_name = (sample.get("name") or "").strip()
-                location = sample.get("location") or "unknown"
-                normalized = {
-                    "incubator_slot": sample.get("incubator_slot"),
-                    "name": sample_name,
-                    "status": sample.get("status") or "",
-                    "location": location,
-                    "well_plate_type": sample.get("well_plate_type") or "96",
-                    "date_to_incubator": sample.get("date_to_incubator") or "",
-                    "available": bool(sample_name and location == "incubator_slot"),
-                }
-                if only_available and not normalized["available"]:
-                    continue
-                normalized_samples.append(normalized)
-
-            normalized_samples.sort(key=lambda item: item["incubator_slot"])
-            return {
-                "success": True,
-                "requested_slot": slot,
-                "only_available": only_available,
-                "samples": normalized_samples,
-            }
-        except Exception as e:
-            logger.error(f"Failed to get incubator samples: {e}", exc_info=True)
-            return {"success": False, "message": str(e), "samples": []}
 
     @schema_function(skip_self=True)
     async def cancel_microscope_scan(self, microscope_id: str):

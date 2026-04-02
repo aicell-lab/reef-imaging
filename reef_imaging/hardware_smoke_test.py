@@ -242,6 +242,7 @@ class HardwareSmokeTestRunner:
     def __init__(
         self,
         orchestrator_service,
+        incubator_service,
         *,
         input_fn: Callable[[str], str] = input,
         output_fn: Callable[[str], None] = print,
@@ -249,6 +250,7 @@ class HardwareSmokeTestRunner:
         now_fn: Callable[[], datetime] = datetime.now,
     ):
         self.orchestrator = orchestrator_service
+        self.incubator = incubator_service
         self.input_fn = input_fn
         self.output_fn = output_fn
         self.report_root = Path(report_root)
@@ -311,6 +313,33 @@ class HardwareSmokeTestRunner:
             raise RuntimeError(status.get("message", "Failed to retrieve runtime status."))
         return status
 
+    async def _get_incubator_samples(self, slot: int = None, only_available: bool = False) -> dict:
+        sample_records = await self.incubator.get_incubator_samples(slot)
+        normalized_samples = []
+        for sample in sample_records:
+            sample_name = (sample.get("name") or "").strip()
+            location = sample.get("location") or "unknown"
+            normalized = {
+                "incubator_slot": sample.get("incubator_slot"),
+                "name": sample_name,
+                "status": sample.get("status") or "",
+                "location": location,
+                "well_plate_type": sample.get("well_plate_type") or "96",
+                "date_to_incubator": sample.get("date_to_incubator") or "",
+                "available": bool(sample_name and location == "incubator_slot"),
+            }
+            if only_available and not normalized["available"]:
+                continue
+            normalized_samples.append(normalized)
+
+        normalized_samples.sort(key=lambda item: item["incubator_slot"])
+        return {
+            "success": True,
+            "requested_slot": slot,
+            "only_available": only_available,
+            "samples": normalized_samples,
+        }
+
     async def _preflight(self) -> tuple[dict, List[dict], List[str]]:
         runtime_status = await self._get_runtime_status()
         if runtime_status.get("active_operations"):
@@ -338,7 +367,7 @@ class HardwareSmokeTestRunner:
         if missing_microscopes:
             raise RuntimeError(f"Configured microscopes are not connected: {missing_microscopes}")
 
-        samples_response = await self.orchestrator.get_incubator_samples(only_available=True)
+        samples_response = await self._get_incubator_samples(only_available=True)
         if not samples_response.get("success", True):
             raise RuntimeError(samples_response.get("message", "Failed to query incubator samples."))
 
@@ -355,7 +384,7 @@ class HardwareSmokeTestRunner:
             return {"success": False, "message": f"Failed to retrieve runtime status after error: {exc}"}
 
     async def _verify_sample_returned(self, cycle: SmokeCycle) -> dict:
-        response = await self.orchestrator.get_incubator_samples(slot=cycle.incubator_slot)
+        response = await self._get_incubator_samples(slot=cycle.incubator_slot)
         if not response.get("success", True):
             raise RuntimeError(response.get("message", "Failed to verify incubator sample location."))
         samples = response.get("samples", [])
@@ -447,7 +476,7 @@ class HardwareSmokeTestRunner:
             return cycle_result
 
     async def _verify_sample_at_hamilton(self, cycle: HamiltonCycle) -> dict:
-        response = await self.orchestrator.get_incubator_samples(slot=cycle.incubator_slot)
+        response = await self._get_incubator_samples(slot=cycle.incubator_slot)
         if not response.get("success", True):
             raise RuntimeError(response.get("message", "Failed to verify sample location."))
         samples = response.get("samples", [])
@@ -840,12 +869,13 @@ async def connect_to_orchestrator(
         "ping_interval": 30,
     })
     orchestrator = await server.get_service("orchestrator-manager")
-    return server, orchestrator
+    incubator = await server.get_service("incubator-control")
+    return server, orchestrator, incubator
 
 
 async def async_main() -> int:
-    server, orchestrator = await connect_to_orchestrator()
-    runner = HardwareSmokeTestRunner(orchestrator)
+    server, orchestrator, incubator = await connect_to_orchestrator()
+    runner = HardwareSmokeTestRunner(orchestrator, incubator)
     try:
         summary = await runner.run()
         return 0 if summary["status"] == "completed" else 1

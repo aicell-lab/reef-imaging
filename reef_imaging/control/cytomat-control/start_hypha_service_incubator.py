@@ -140,6 +140,7 @@ class IncubatorService:
             "get_temperature": self.get_temperature,
             "get_co2_level": self.get_co2_level,
             "get_slot_information": self.get_slot_information,
+            "get_incubator_samples": self.get_incubator_samples,
             "get_well_plate_type": self.get_well_plate_type,
             # Add new location-related functions
             "update_sample_location": self.update_sample_location,
@@ -247,6 +248,38 @@ class IncubatorService:
             return slot_info
         except Exception as e:
             logger.error(f"Failed to get slot information: {e}")
+            raise e
+
+    @schema_function(skip_self=True)
+    def get_incubator_samples(self, slot: Optional[int] = Field(None, description="Slot number, range: 1-42, or None for all slots")):
+        """Return canonical sample metadata stored by the incubator service."""
+
+        try:
+            sample_payload = self.get_slot_information(slot)
+            if sample_payload is None:
+                sample_records = []
+            elif isinstance(sample_payload, list):
+                sample_records = sample_payload
+            else:
+                sample_records = [sample_payload]
+
+            normalized_samples = []
+            for sample in sample_records:
+                normalized_samples.append(
+                    {
+                        "incubator_slot": sample.get("incubator_slot"),
+                        "name": (sample.get("name") or "").strip(),
+                        "status": sample.get("status") or "",
+                        "location": sample.get("location") or "unknown",
+                        "well_plate_type": sample.get("well_plate_type") or "96",
+                        "date_to_incubator": sample.get("date_to_incubator") or "",
+                    }
+                )
+
+            normalized_samples.sort(key=lambda item: item["incubator_slot"])
+            return normalized_samples
+        except Exception as e:
+            logger.error(f"Failed to get incubator samples: {e}")
             raise e
 
     @schema_function(skip_self=True)
