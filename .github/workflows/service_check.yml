@@ -1,9 +1,7 @@
 name: Service Health Check
 
 on:
-  schedule:
-    - cron: '*/9 * * * *'  # Every 9 minutes
-  workflow_dispatch:  # Allows manual triggering of the workflow
+  workflow_dispatch:  # Manual trigger only — scheduled runs disabled to save Actions quota
 
 jobs:
   check_services:
