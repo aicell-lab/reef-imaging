@@ -103,9 +103,9 @@ Tools for uploading and organizing data on the Hypha platform.
 **Files**:
 - `lab_cameras.py` — Auto-detects + registers 2 USB lab cameras
 - `realsense_camera.py` — RealSense camera for robotic arm
-- `hamilton_camera.py` — Hamilton Windows camera
 - `lab_cameras_watchdog.py` — Linux watchdog (systemctl restart)
-- `hamilton_watchdog.py` — Windows watchdog (sc stop/start)
+
+> **Note:** Hamilton camera streaming (`reef-hamilton-feed`) has been moved to the [pyhamilton](https://github.com/cccoolll/pyhamilton) repository (`pyhamilton/streaming/`).
 
 ### 5. Supplementary Tools (`tools/`)
 Image stitching, multi-resolution pyramid generation, format conversion (TIFF, OME-Zarr), channel merging, intensity normalization.

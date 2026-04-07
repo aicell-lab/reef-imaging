@@ -8,7 +8,8 @@ This folder contains camera services for the reef imaging lab setup.
 |------|--------|---------|-----------------|
 | `lab_cameras.py` | 2× USB lab cameras (Linux) | reef-server | `reef-lab-camera-1`, `reef-lab-camera-2` |
 | `realsense_camera.py` | RealSense RGB-D (robotic arm) | reef-server | `reef-realsense-feed` |
-| `hamilton_camera.py` | USB camera (Hamilton) | Hamilton Windows PC | `reef-hamilton-feed` |
+
+> **Note:** Hamilton camera streaming has been moved to the [pyhamilton](https://github.com/cccoolll/pyhamilton) repository (`pyhamilton/streaming/`).
 
 ## Lab Cameras (Linux — `lab_cameras.py`)
 
@@ -85,51 +86,6 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable lab-cameras-watchdog
 sudo systemctl start lab-cameras-watchdog
-```
-
----
-
-## Hamilton Camera (Windows — `hamilton_camera.py`)
-
-Configuration:
-- `HAMILTON_CAMERA_INDEX` — OpenCV camera index (default: first available)
-- `HAMILTON_VIDEO_DIR` — time-lapse storage directory (default: `C:\reef\hamilton_video`)
-
-### Windows Service (NSSM)
-
-Service name: `reef-hamilton-camera`
-
-Install (run as Administrator):
-```powershell
-& "C:\Program Files\nssm\nssm.exe" install reef-hamilton-camera "C:\Users\Hamilton\Miniconda3\envs\reef-imaging\python.exe" "reef_imaging\lab_live_stream\hamilton_camera.py"
-& "C:\Program Files\nssm\nssm.exe" set reef-hamilton-camera AppDirectory "C:\Users\Hamilton\workspace\reef-imaging"
-& "C:\Program Files\nssm\nssm.exe" set reef-hamilton-camera Start SERVICE_AUTO_START
-```
-
-```bat
-sc start reef-hamilton-camera
-sc stop reef-hamilton-camera
-sc query reef-hamilton-camera
-```
-
-### Watchdog (`hamilton_watchdog.py`)
-
-Polls `https://hypha.aicell.io/reef-imaging/apps/reef-hamilton-feed/health` every 60 seconds and restarts `reef-hamilton-camera` via `sc stop/start` if the check fails.
-
-**Must run as Administrator.**
-
-Service name: `reef-hamilton-watchdog`
-
-Install (run as Administrator):
-```powershell
-& "C:\Program Files\nssm\nssm.exe" install reef-hamilton-watchdog "C:\Users\Hamilton\Miniconda3\envs\reef-imaging\python.exe" "reef_imaging\lab_live_stream\hamilton_watchdog.py"
-& "C:\Program Files\nssm\nssm.exe" set reef-hamilton-watchdog AppDirectory "C:\Users\Hamilton\workspace\reef-imaging"
-& "C:\Program Files\nssm\nssm.exe" set reef-hamilton-watchdog Start SERVICE_AUTO_START
-& "C:\Program Files\nssm\nssm.exe" set reef-hamilton-watchdog ObjectName LocalSystem
-```
-
-```bat
-sc start reef-hamilton-watchdog
 ```
 
 ---
