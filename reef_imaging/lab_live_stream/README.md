@@ -9,8 +9,6 @@ This folder contains camera services for the reef imaging lab setup.
 | `lab_cameras.py` | 2× USB lab cameras (Linux) | reef-server | `reef-lab-camera-1`, `reef-lab-camera-2` |
 | `realsense_camera.py` | RealSense RGB-D (robotic arm) | reef-server | `reef-realsense-feed` |
 
-> **Note:** Hamilton camera streaming has been moved to the [pyhamilton](https://github.com/cccoolll/pyhamilton) repository (`pyhamilton/streaming/`).
-
 ## Lab Cameras (Linux — `lab_cameras.py`)
 
 Auto-detects up to 2 USB cameras matching the name pattern `"HD USB Camera"` (configurable via `LAB_CAMERA_NAME_PATTERN` env var) and registers each as a separate Hypha ASGI service.

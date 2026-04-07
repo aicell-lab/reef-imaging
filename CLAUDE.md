@@ -50,15 +50,6 @@ Orchestrator service visibility is `"protected"`. Camera services are `"public"`
 | `lab-cameras` | `reef_imaging/lab_live_stream/lab_cameras.py` | 2× USB lab camera streams |
 | `lab-cameras-watchdog` | `reef_imaging/lab_live_stream/lab_cameras_watchdog.py` | Restarts lab-cameras if unhealthy |
 
-### Windows services (Hamilton PC, via NSSM)
-
-| Service | Script | Location |
-|---------|--------|----------|
-| `reef-hamilton-camera` | `hamilton_camera.py` | [pyhamilton](https://github.com/cccoolll/pyhamilton) (`pyhamilton/streaming/`) |
-| `reef-hamilton-watchdog` | `hamilton_watchdog.py` | [pyhamilton](https://github.com/cccoolll/pyhamilton) (`pyhamilton/streaming/`) |
-
-> **Note:** Hamilton streaming services have been moved to the pyhamilton repository.
-
 ## Hypha service IDs
 
 | Service | ID | Machine |
@@ -67,7 +58,7 @@ Orchestrator service visibility is `"protected"`. Camera services are `"public"`
 | Lab camera 1 | `reef-lab-camera-1` | reef-server |
 | Lab camera 2 | `reef-lab-camera-2` | reef-server |
 | RealSense arm cam | `reef-realsense-feed` | reef-server |
-| Hamilton cam | `reef-hamilton-feed` | Hamilton Windows PC ([pyhamilton](https://github.com/cccoolll/pyhamilton)) |
+
 
 ## File structure highlights
 
@@ -80,7 +71,6 @@ reef_imaging/
 │   ├── realsense_camera.py      # RealSense for robotic arm
 │   ├── lab_cameras_watchdog.py  # Linux watchdog (systemctl restart)
 │   └── README.md
-# Note: Hamilton camera streaming moved to pyhamilton repository
 ├── control/
 │   ├── squid-control/           # SQUID microscope (git submodule / separate package)
 │   ├── dorna-control/           # Dorna robotic arm

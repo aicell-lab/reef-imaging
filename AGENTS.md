@@ -10,7 +10,7 @@ REEF Imaging is an automated microscopy platform for biological time-lapse exper
 - **Automated imaging cycles**: Load → Scan → Unload samples
 - **Multi-microscope support**: Up to 3 microscopes (squid-1, squid-2, squid-plus-3)
 - **Time-lapse scheduling**: Configurable imaging intervals and time points
-- **Live monitoring**: Multiple camera streams (USB, RealSense, Hamilton)
+- **Live monitoring**: Multiple camera streams (USB, RealSense)
 - **Cloud integration**: Hypha platform for remote access and data management
 
 ## Technology Stack
@@ -45,9 +45,7 @@ reef-imaging/
 │   ├── lab_live_stream/               # Camera streaming services
 │   │   ├── lab_cameras.py             # 2× USB cameras (Linux)
 │   │   ├── realsense_camera.py        # RealSense arm camera
-│   │   ├── hamilton_camera.py         # Hamilton Windows camera
-│   │   ├── lab_cameras_watchdog.py    # Linux watchdog
-│   │   └── hamilton_watchdog.py       # Windows watchdog
+│   │   └── lab_cameras_watchdog.py    # Linux watchdog
 │   └── utils/                         # Common utilities
 ├── docker/                            # Docker Compose for Hypha stack
 ├── traefik/                           # Reverse proxy configuration
@@ -177,7 +175,7 @@ await server.serve()  # blocks
 | Lab Camera 1 | `reef-lab-camera-1` | reef-server |
 | Lab Camera 2 | `reef-lab-camera-2` | reef-server |
 | RealSense | `reef-realsense-feed` | reef-server |
-| Hamilton Cam | `reef-hamilton-feed` | Hamilton Windows PC |
+
 
 ### Orchestrator APIs
 
@@ -557,7 +555,7 @@ Note: Microscope has built-in mirror functionality in squid-control package.
 | Lab Camera 1 | `/media/reef/harddisk/lab_video/camera_1` |
 | Lab Camera 2 | `/media/reef/harddisk/lab_video/camera_2` |
 | RealSense | `/media/reef/harddisk/dorna_video` |
-| Hamilton | `C:\reef\hamilton_video` (Windows) |
+
 
 Videos older than 72 hours are auto-deleted by each camera service.
 
