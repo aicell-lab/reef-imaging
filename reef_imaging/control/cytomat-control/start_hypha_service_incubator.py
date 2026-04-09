@@ -2,6 +2,7 @@ import asyncio
 import argparse
 import os
 import signal
+import glob
 from hypha_rpc import connect_to_server, login
 from cytomat import Cytomat
 from pydantic import Field
@@ -16,7 +17,46 @@ import time
 dotenv.load_dotenv()  
 ENV_FILE = dotenv.find_dotenv()  
 if ENV_FILE:  
-    dotenv.load_dotenv(ENV_FILE)  
+    dotenv.load_dotenv(ENV_FILE)
+
+
+def find_serial_port(preferred_port=None):
+    """
+    Find an available serial port for the Cytomat incubator.
+    
+    Args:
+        preferred_port: Preferred port path (e.g., '/dev/ttyUSB0')
+    
+    Returns:
+        str: Path to the available serial port
+    
+    Raises:
+        RuntimeError: If no serial port is found
+    """
+    # If preferred port is specified and exists, use it
+    if preferred_port and os.path.exists(preferred_port):
+        return preferred_port
+    
+    # Search for common USB serial device patterns
+    patterns = ['/dev/ttyUSB*', '/dev/ttyACM*']
+    available_ports = []
+    
+    for pattern in patterns:
+        available_ports.extend(glob.glob(pattern))
+    
+    if available_ports:
+        # Sort to get predictable ordering (ttyUSB0, ttyUSB1, etc.)
+        available_ports.sort()
+        logger.info(f"Auto-detected serial port: {available_ports[0]} (available ports: {available_ports})")
+        return available_ports[0]
+    
+    # No ports found
+    raise RuntimeError(
+        f"No serial port found for Cytomat incubator. "
+        f"Searched patterns: {patterns}. "
+        f"Please check that the incubator is connected and powered on, "
+        f"or specify the correct port with --serial-port or CYPOMAT_SERIAL_PORT environment variable."
+    )  
 
 
 ERROR_CODES = {
@@ -67,10 +107,19 @@ class IncubatorService:
         self.local = local
         self.simulation = simulation
         self.server_url = "http://localhost:9527" if local else "https://hypha.aicell.io"
-        # Use provided port, environment variable, or default to /dev/ttyUSB0
-        port = serial_port or os.environ.get("CYPOMAT_SERIAL_PORT", "/dev/ttyUSB0")
-        logger.info(f"Using serial port: {port}")
-        self.c = Cytomat(port, json_path="/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/docs/config.json") if not simulation else None
+        
+        if not simulation:
+            # Get preferred port from args or environment variable
+            preferred_port = serial_port or os.environ.get("CYPOMAT_SERIAL_PORT")
+            try:
+                port = find_serial_port(preferred_port)
+                logger.info(f"Using serial port: {port}")
+            except RuntimeError as e:
+                logger.error(str(e))
+                raise
+            self.c = Cytomat(port, json_path="/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/docs/config.json")
+        else:
+            self.c = None
         self.samples_file = "/home/tao/workspace/reef-imaging/reef_imaging/control/cytomat-control/samples.json"
         self.server = None
         self.service_id = "incubator-control" + ("-simulation" if simulation else "")
