@@ -169,6 +169,7 @@ await server.serve()  # blocks
 | Orchestrator | `orchestrator-manager` | reef-server |
 | Incubator | `incubator-control` | reef-server |
 | Robotic Arm | `robotic-arm-control` | reef-server |
+| Hamilton Executor | `hamilton-script-executor` | Hamilton workstation via local Hypha / cloud mirror |
 | Microscope 1 | `microscope-squid-1` | reef-server |
 | Microscope 2 | `microscope-squid-2` | reef-server |
 | Microscope 3 | `microscope-squid-plus-3` | reef-server |
@@ -196,6 +197,8 @@ The orchestrator exposes the following Hypha service methods:
 | `process_timelapse_offline(experiment_id)` | Offline stitching and upload |
 | `get_lab_video_stream_urls()` | Get camera stream URLs |
 | `transport_plate(from_device, to_device, slot)` | **Unified transport API** |
+| `get_hamilton_status()` | Get Hamilton executor connectivity, executor status, and active Hamilton-related operations |
+| `run_hamilton_protocol(script_content, timeout=3600)` | Start Hamilton script content without any built-in transport and return immediately |
 
 **Unified Transport API:**
 The `transport_plate()` method provides a single interface for all plate transport operations.
@@ -225,6 +228,25 @@ await transport_plate("microscope-squid-1", "hamilton", slot=5)
 ```python
 await robotic_arm.transport_plate(from_device="incubator", to_device="microscope-squid-1")
 ```
+
+**Hamilton Execution API:**
+Keep Hamilton execution separate from plate movement.
+
+```python
+# 1. Move the plate onto Hamilton
+await orchestrator.transport_plate("incubator", "hamilton", slot=5)
+
+# 2. Execute a Hamilton script on the existing executor
+result = await orchestrator.run_hamilton_protocol(script_content=script_text, timeout=3600)
+
+# 3. Poll Hamilton status until the executor is idle again
+status = await orchestrator.get_hamilton_status()
+
+# 4. Move the plate away explicitly
+await orchestrator.transport_plate("hamilton", "microscope-squid-1", slot=5)
+```
+
+`run_hamilton_protocol(...)` assumes the plate is already on Hamilton. It does not load from incubator, move the robotic arm, return the plate afterward, or wait for protocol completion. Use `get_hamilton_status()` to poll executor state.
 
 ### Microscope Busy-State Management
 
@@ -332,6 +354,7 @@ reef-hardware-smoke-test
 
 - This is a real hardware verification workflow, not a background diagnostic.
 - It exercises incubator access, robotic arm transport, and a short scan on each configured microscope.
+- Hamilton modes in this smoke test validate transport only. They do not execute Hamilton liquid-handling scripts.
 - A responsible person MUST remain physically on site in the lab for the entire run.
 - The script is intended for post-integration checks, post-maintenance checks, and safety validation after orchestration changes.
 - It stops on the first failure and offers emergency actions to cancel a scan or halt the robot.
@@ -368,6 +391,7 @@ python start_hypha_service_robotic_arm.py --local
 cd reef_imaging/control/mirror-services
 python mirror_incubator.py &
 python mirror_robotic_arm.py &
+python mirror_hamilton.py &
 
 # Microscope mirrors (squid-control package has built-in mirroring)
 # These are configured in microscope configs and run automatically with microscope services
@@ -378,6 +402,7 @@ python mirror_robotic_arm.py &
 |----------------|--------|------------------|
 | Incubator mirror | `mirror_incubator.py` | `incubator-control` |
 | Robotic arm mirror | `mirror_robotic_arm.py` | `robotic-arm-control` |
+| Hamilton mirror | `mirror_hamilton.py` | `hamilton-script-executor` |
 | Microscope 1 mirror | Built-in squid-control | `microscope-squid-1` |
 | Microscope 2 mirror | Built-in squid-control | `microscope-squid-2` |
 | Microscope 3 mirror | Built-in squid-control | `microscope-squid-plus-3` |

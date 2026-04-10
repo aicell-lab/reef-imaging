@@ -26,6 +26,10 @@ from reef_imaging.orchestration import (
 
 logger = logging.getLogger(__name__)
 
+
+class HamiltonBusyError(RuntimeError):
+    """Raised when a Hamilton-related action is rejected because the executor is busy."""
+
 # Set up logging
 def setup_logging(log_file="orchestrator.log", max_bytes=10*1024*1024, backup_count=5):
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
@@ -81,10 +85,12 @@ class OrchestrationSystem:
         self.microscope_services = {} # microscope_id -> service object
         self.configured_microscopes_info = {} # microscope_id -> config dict from config.json
         self.robotic_arm = None
+        self.hamilton_executor = None
         self.sample_on_microscope_flags = {} # microscope_id -> bool, True if sample on that microscope
 
         self.incubator_id = "incubator-control"
         self.robotic_arm_id = "robotic-arm-control"
+        self.hamilton_executor_id = "hamilton-script-executor"
 
         self.tasks = {} # Stores task configurations and states
         self.health_check_tasks = {} # Stores asyncio tasks for health checks, keyed by (service_type, service_id)
@@ -139,8 +145,14 @@ class OrchestrationSystem:
     def _slot_resource(self, incubator_slot: int) -> str:
         return f"incubator-slot:{incubator_slot}"
 
+    def _hamilton_resource(self) -> str:
+        return "hamilton"
+
     def _transport_resources(self) -> tuple[str, ...]:
         return ("transport-lane", "robotic-arm", "incubator")
+
+    def _hamilton_transport_resources(self) -> tuple[str, ...]:
+        return self._transport_resources() + (self._hamilton_resource(),)
 
     def _build_request(
         self,
@@ -181,6 +193,16 @@ class OrchestrationSystem:
         }
         return response
 
+    def _hamilton_busy_response(self, message: str, *, executor_status: dict = None) -> dict:
+        response = {
+            "success": False,
+            "message": message,
+            "state": "busy",
+        }
+        if executor_status is not None:
+            response["executor_status"] = executor_status
+        return response
+
     def _build_service_api(self) -> dict:
         return {
             "name": "Orchestrator Manager",
@@ -199,6 +221,7 @@ class OrchestrationSystem:
             "transport_plate": self.transport_plate_api,
             # Status and monitoring
             "get_runtime_status": self.get_runtime_status,
+            "get_hamilton_status": self.get_hamilton_status,
             "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
             # Emergency controls
             "cancel_microscope_scan": self.cancel_microscope_scan,
@@ -206,6 +229,7 @@ class OrchestrationSystem:
             # Processing
             "process_timelapse_offline": self.process_timelapse_offline_api,
             "scan_microscope_only": self.scan_microscope_only_api,
+            "run_hamilton_protocol": self.run_hamilton_protocol,
         }
 
     async def _ensure_local_server_connection(self):
@@ -651,6 +675,8 @@ class OrchestrationSystem:
                             service = self.microscope_services.get(service_identifier)
                         elif service_type == 'robotic_arm':
                             service = self.robotic_arm
+                        elif service_type == 'hamilton':
+                            service = self.hamilton_executor
 
                         if service is None:
                             logger.error(f"Failed to get refreshed {service_name} service reference. Will retry.")
@@ -674,6 +700,8 @@ class OrchestrationSystem:
                                 service = self.microscope_services.get(service_identifier)
                             elif service_type == 'robotic_arm':
                                 service = self.robotic_arm
+                            elif service_type == 'hamilton':
+                                service = self.hamilton_executor
                             consecutive_failures = 0
                         except Exception as reconnect_err:
                             logger.error(f"Full reconnect failed: {reconnect_err}. Will retry in 60 seconds.")
@@ -739,6 +767,10 @@ class OrchestrationSystem:
                 logger.info(f"Refreshing robotic arm service proxy ({self.robotic_arm_id})...")
                 self.robotic_arm = await self.local_server_connection.get_service(self.robotic_arm_id)
                 logger.info(f"Robotic arm service proxy refreshed.")
+            elif service_type == 'hamilton':
+                logger.info(f"Refreshing Hamilton executor service proxy ({self.hamilton_executor_id})...")
+                self.hamilton_executor = await self.local_server_connection.get_service(self.hamilton_executor_id)
+                logger.info("Hamilton executor service proxy refreshed.")
             else:
                 raise Exception(f"Unknown service type: {service_type}")
         except ConnectionError:
@@ -755,6 +787,7 @@ class OrchestrationSystem:
         self.local_server_connection = None
         self.incubator = None
         self.robotic_arm = None
+        self.hamilton_executor = None
         self.microscope_services.clear()
         return await self.setup_connections()
 
@@ -765,6 +798,8 @@ class OrchestrationSystem:
             actual_service_id = self.incubator_id
         elif service_type == 'robotic_arm':
             actual_service_id = self.robotic_arm_id
+        elif service_type == 'hamilton':
+            actual_service_id = self.hamilton_executor_id
         
         if actual_service_id:
              await self._stop_health_check(service_type, actual_service_id)
@@ -782,6 +817,9 @@ class OrchestrationSystem:
             elif service_type == 'robotic_arm' and self.robotic_arm:
                 logger.info(f"Clearing robotic arm service reference ({self.robotic_arm_id})...")
                 self.robotic_arm = None
+            elif service_type == 'hamilton' and self.hamilton_executor:
+                logger.info(f"Clearing Hamilton executor service reference ({self.hamilton_executor_id})...")
+                self.hamilton_executor = None
                 
         except Exception as e:
             logger.error(f"Error clearing {service_type} service reference ({service_id_to_disconnect if service_id_to_disconnect else ''}): {e}")
@@ -807,7 +845,17 @@ class OrchestrationSystem:
                 self.robotic_arm = await connection.get_service(self.robotic_arm_id)
                 logger.info(f"Robotic arm ({self.robotic_arm_id}) service proxy obtained.")
                 await self._start_health_check('robotic_arm', self.robotic_arm, self.robotic_arm_id)
-            
+
+            if not self.hamilton_executor:
+                try:
+                    self.hamilton_executor = await connection.get_service(self.hamilton_executor_id)
+                    logger.info(f"Hamilton executor ({self.hamilton_executor_id}) service proxy obtained.")
+                    await self._start_health_check('hamilton', self.hamilton_executor, self.hamilton_executor_id)
+                except Exception as hamilton_error:
+                    logger.warning(
+                        f"Hamilton executor ({self.hamilton_executor_id}) is not currently available: {hamilton_error}"
+                    )
+
         except Exception as e:
             logger.error(f"Failed to setup local services (incubator/robotic arm): {e}")
             return False 
@@ -864,6 +912,9 @@ class OrchestrationSystem:
         
         if self.robotic_arm:
             await self.disconnect_single_service('robotic_arm', self.robotic_arm_id)
+
+        if self.hamilton_executor:
+            await self.disconnect_single_service('hamilton', self.hamilton_executor_id)
         
         # Disconnect the stable server connection
         if self.local_server_connection:
@@ -972,6 +1023,134 @@ class OrchestrationSystem:
         except Exception as e:
             logger.error(f"Transport operation failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
+
+    async def _get_hamilton_executor_proxy(self, *, refresh_if_missing: bool = True):
+        """Return the Hamilton executor proxy, optionally refreshing local services."""
+
+        if self.hamilton_executor is None and refresh_if_missing:
+            await self.setup_connections()
+        return self.hamilton_executor
+
+    async def _get_hamilton_executor_status(self, *, refresh_if_missing: bool = True):
+        """Fetch the current Hamilton executor status, or ``None`` if unavailable."""
+
+        service = await self._get_hamilton_executor_proxy(refresh_if_missing=refresh_if_missing)
+        if service is None:
+            return None
+        return await service.get_status()
+
+    async def _assert_hamilton_idle_for_transport(self):
+        """Reject Hamilton transport while the executor is busy with a protocol run."""
+
+        status = await self._get_hamilton_executor_status()
+        if status is None:
+            raise RuntimeError(
+                f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
+            )
+        if status.get("busy"):
+            current_action = status.get("current_action_id") or status.get("action_id")
+            raise HamiltonBusyError(
+                f"Hamilton is busy executing a protocol"
+                f"{f' ({current_action})' if current_action else ''}."
+            )
+        return status
+
+    @schema_function(skip_self=True)
+    async def get_hamilton_status(self):
+        """Return Hamilton executor connectivity and the current executor status."""
+
+        try:
+            executor_status = await self._get_hamilton_executor_status()
+            admission_snapshot = await self.admission_controller.snapshot()
+            hamilton_operations = [
+                operation
+                for operation in admission_snapshot["active_operations"]
+                if self._hamilton_resource() in operation.get("resources", [])
+            ]
+            return {
+                "success": True,
+                "connected": executor_status is not None,
+                "service_id": self.hamilton_executor_id,
+                "executor_status": executor_status,
+                "active_operations": hamilton_operations,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get Hamilton status: {e}", exc_info=True)
+            return {
+                "success": False,
+                "connected": False,
+                "service_id": self.hamilton_executor_id,
+                "executor_status": None,
+                "active_operations": [],
+                "message": str(e),
+            }
+
+    @schema_function(skip_self=True)
+    async def run_hamilton_protocol(
+        self,
+        script_content: str,
+        timeout: int = 3600,
+    ):
+        """Start a Hamilton script on the existing executor service without transport."""
+
+        if not isinstance(script_content, str) or not script_content.strip():
+            return {"success": False, "message": "script_content must be a non-empty string."}
+        if timeout <= 0:
+            return {"success": False, "message": "timeout must be greater than zero."}
+
+        try:
+            service = await self._get_hamilton_executor_proxy()
+            if service is None:
+                raise RuntimeError(
+                    f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
+                )
+
+            request = self._build_request(
+                "hamilton-execution",
+                extra_resources=(self._hamilton_resource(),),
+                metadata={"timeout_seconds": timeout},
+            )
+
+            async with self.admission_controller.hold(request):
+                start_result = await service.start_execution(
+                    script_content=script_content,
+                    timeout=timeout,
+                )
+                if not start_result.get("accepted"):
+                    live_status = await self._get_hamilton_executor_status(refresh_if_missing=False)
+                    message = start_result.get("error") or "Hamilton executor rejected the run request."
+                    response = {
+                        "success": False,
+                        "message": message,
+                        "start_result": start_result,
+                        "hamilton_status": live_status,
+                    }
+                    if start_result.get("busy"):
+                        response["state"] = "busy"
+                    return response
+
+            return {
+                "success": True,
+                "message": "Hamilton protocol accepted and started.",
+                "start_result": start_result,
+                "action_id": start_result.get("action_id"),
+                "state": start_result.get("status", "running"),
+                "hamilton_status": await self.get_hamilton_status(),
+                "runtime_status": await self.get_runtime_status(),
+            }
+        except ResourceBusyError as busy_error:
+            return self._busy_response(
+                "Hamilton protocol request rejected - Hamilton-related resources are busy.",
+                busy_error,
+            )
+        except Exception as e:
+            logger.error(f"Hamilton protocol execution failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": str(e),
+                "hamilton_status": await self.get_hamilton_status(),
+                "runtime_status": await self.get_runtime_status(),
+            }
 
     async def _execute_load_operation(
         self,
@@ -1175,7 +1354,7 @@ class OrchestrationSystem:
         if manage_transport_resources:
             request = self._build_request(
                 "transport-load-hamilton",
-                extra_resources=self._transport_resources(),
+                extra_resources=self._hamilton_transport_resources(),
                 metadata={
                     "phase": "load_to_hamilton",
                     "incubator_slot": incubator_slot,
@@ -1198,6 +1377,7 @@ class OrchestrationSystem:
         except Exception as e:
             logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
 
+        await self._assert_hamilton_idle_for_transport()
         logger.info(f"Loading sample from incubator slot {incubator_slot} to Hamilton...")
 
         # Mark critical operation
@@ -1243,7 +1423,7 @@ class OrchestrationSystem:
         if manage_transport_resources:
             request = self._build_request(
                 "transport-unload-hamilton",
-                extra_resources=self._transport_resources(),
+                extra_resources=self._hamilton_transport_resources(),
                 metadata={
                     "phase": "unload_from_hamilton",
                     "incubator_slot": incubator_slot,
@@ -1270,6 +1450,7 @@ class OrchestrationSystem:
         except Exception as e:
             logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
 
+        await self._assert_hamilton_idle_for_transport()
         logger.info(f"Unloading sample from Hamilton to incubator slot {incubator_slot}...")
 
         # Mark critical operation
@@ -1304,13 +1485,15 @@ class OrchestrationSystem:
     async def _load_to_hamilton_api_wrapper(self, slot: int):
         """Internal wrapper for incubator -> hamilton transport."""
         try:
-            if not self.incubator or not self.robotic_arm:
+            if not self.incubator or not self.robotic_arm or not self.hamilton_executor:
                 if not await self.setup_connections():
                     raise Exception("Transport services are not ready.")
+            if not self.hamilton_executor:
+                raise Exception("Hamilton executor service is not ready.")
             request = self._build_request(
                 "manual-load-hamilton",
                 incubator_slot=slot,
-                extra_resources=self._transport_resources(),
+                extra_resources=self._hamilton_transport_resources(),
                 metadata={"trigger": "api", "action": "load_to_hamilton"},
             )
             async with self.admission_controller.hold(request):
@@ -1318,6 +1501,8 @@ class OrchestrationSystem:
             return {"success": True, "message": f"Load from slot {slot} to Hamilton completed."}
         except ResourceBusyError as busy_error:
             return self._busy_response("Load request rejected - orchestrator is busy.", busy_error)
+        except HamiltonBusyError as busy_error:
+            return self._hamilton_busy_response(str(busy_error))
         except Exception as e:
             logger.error(f"Load operation to Hamilton failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
@@ -1325,13 +1510,15 @@ class OrchestrationSystem:
     async def _unload_from_hamilton_api_wrapper(self, slot: int):
         """Internal wrapper for hamilton -> incubator transport."""
         try:
-            if not self.incubator or not self.robotic_arm:
+            if not self.incubator or not self.robotic_arm or not self.hamilton_executor:
                 if not await self.setup_connections():
                     raise Exception("Transport services are not ready.")
+            if not self.hamilton_executor:
+                raise Exception("Hamilton executor service is not ready.")
             request = self._build_request(
                 "manual-unload-hamilton",
                 incubator_slot=slot,
-                extra_resources=self._transport_resources(),
+                extra_resources=self._hamilton_transport_resources(),
                 metadata={"trigger": "api", "action": "unload_from_hamilton"},
             )
             async with self.admission_controller.hold(request):
@@ -1339,6 +1526,8 @@ class OrchestrationSystem:
             return {"success": True, "message": f"Unload from Hamilton to slot {slot} completed."}
         except ResourceBusyError as busy_error:
             return self._busy_response("Unload request rejected - orchestrator is busy.", busy_error)
+        except HamiltonBusyError as busy_error:
+            return self._hamilton_busy_response(str(busy_error))
         except Exception as e:
             logger.error(f"Unload operation from Hamilton failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
@@ -1356,7 +1545,7 @@ class OrchestrationSystem:
                 "transport-microscope-to-hamilton",
                 microscope_id=microscope_id_str,
                 incubator_slot=incubator_slot,
-                extra_resources=self._transport_resources(),
+                extra_resources=self._hamilton_transport_resources(),
                 metadata={
                     "phase": "microscope_to_hamilton",
                     "microscope_id": microscope_id_str,
@@ -1390,6 +1579,7 @@ class OrchestrationSystem:
             logger.info(f"Sample plate not on microscope {microscope_id_str} according to flags")
             return
 
+        await self._assert_hamilton_idle_for_transport()
         logger.info(f"Transporting sample from microscope {microscope_id_str} to Hamilton (slot {incubator_slot})...")
 
         # Mark critical operation
@@ -1441,7 +1631,7 @@ class OrchestrationSystem:
                 "transport-hamilton-to-microscope",
                 microscope_id=microscope_id_str,
                 incubator_slot=incubator_slot,
-                extra_resources=self._transport_resources(),
+                extra_resources=self._hamilton_transport_resources(),
                 metadata={
                     "phase": "hamilton_to_microscope",
                     "microscope_id": microscope_id_str,
@@ -1474,6 +1664,7 @@ class OrchestrationSystem:
             logger.info(f"Sample plate already on microscope {microscope_id_str}. Skipping load.")
             return
 
+        await self._assert_hamilton_idle_for_transport()
         logger.info(f"Transporting sample from Hamilton to microscope {microscope_id_str} (slot {incubator_slot})...")
 
         # Mark critical operation
@@ -1520,14 +1711,16 @@ class OrchestrationSystem:
         if microscope_id not in self.configured_microscopes_info:
             return {"success": False, "message": f"Microscope ID '{microscope_id}' not found in configured microscopes."}
         try:
-            if not self.incubator or not self.robotic_arm or microscope_id not in self.microscope_services:
+            if not self.incubator or not self.robotic_arm or not self.hamilton_executor or microscope_id not in self.microscope_services:
                 if not await self.setup_connections() or microscope_id not in self.microscope_services:
                     raise Exception(f"Transport services are not ready for microscope {microscope_id}.")
+            if not self.hamilton_executor:
+                raise Exception("Hamilton executor service is not ready.")
             request = self._build_request(
                 "manual-microscope-to-hamilton",
                 microscope_id=microscope_id,
                 incubator_slot=slot,
-                extra_resources=self._transport_resources(),
+                extra_resources=self._hamilton_transport_resources(),
                 metadata={"trigger": "api", "action": "microscope_to_hamilton"},
             )
             async with self.admission_controller.hold(request):
@@ -1535,6 +1728,8 @@ class OrchestrationSystem:
             return {"success": True, "message": f"Transport from {microscope_id} to Hamilton completed."}
         except ResourceBusyError as busy_error:
             return self._busy_response("Transport request rejected - orchestrator is busy.", busy_error)
+        except HamiltonBusyError as busy_error:
+            return self._hamilton_busy_response(str(busy_error))
         except Exception as e:
             logger.error(f"Transport from microscope to Hamilton failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
@@ -1544,14 +1739,16 @@ class OrchestrationSystem:
         if microscope_id not in self.configured_microscopes_info:
             return {"success": False, "message": f"Microscope ID '{microscope_id}' not found in configured microscopes."}
         try:
-            if not self.incubator or not self.robotic_arm or microscope_id not in self.microscope_services:
+            if not self.incubator or not self.robotic_arm or not self.hamilton_executor or microscope_id not in self.microscope_services:
                 if not await self.setup_connections() or microscope_id not in self.microscope_services:
                     raise Exception(f"Transport services are not ready for microscope {microscope_id}.")
+            if not self.hamilton_executor:
+                raise Exception("Hamilton executor service is not ready.")
             request = self._build_request(
                 "manual-hamilton-to-microscope",
                 microscope_id=microscope_id,
                 incubator_slot=slot,
-                extra_resources=self._transport_resources(),
+                extra_resources=self._hamilton_transport_resources(),
                 metadata={"trigger": "api", "action": "hamilton_to_microscope"},
             )
             async with self.admission_controller.hold(request):
@@ -1559,6 +1756,8 @@ class OrchestrationSystem:
             return {"success": True, "message": f"Transport from Hamilton to {microscope_id} completed."}
         except ResourceBusyError as busy_error:
             return self._busy_response("Transport request rejected - orchestrator is busy.", busy_error)
+        except HamiltonBusyError as busy_error:
+            return self._hamilton_busy_response(str(busy_error))
         except Exception as e:
             logger.error(f"Transport from Hamilton to microscope failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
@@ -2494,6 +2693,7 @@ class OrchestrationSystem:
             connected_services = {
                 "incubator": self.incubator is not None,
                 "robotic_arm": self.robotic_arm is not None,
+                "hamilton": self.hamilton_executor is not None,
                 "microscopes": {
                     mic_id: mic_id in self.microscope_services
                     for mic_id in expected_microscopes
