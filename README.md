@@ -167,13 +167,14 @@ Hamilton-specific orchestrator contract:
 
 - `transport_plate(from_device, to_device, slot=...)` remains the only physical movement API, including routes touching `hamilton`
 - `get_hamilton_status()` reports Hamilton executor connectivity, executor status, and active Hamilton-related operations
-- `run_hamilton_protocol(script_content, timeout=3600)` executes Hamilton script content only and assumes the plate is already on Hamilton
+- `run_hamilton_protocol(script_content, timeout=3600)` starts Hamilton script content only and returns immediately with an `action_id`
 
 Recommended composed workflow:
 
 1. `transport_plate(..., "hamilton", ...)`
 2. `run_hamilton_protocol(script_content=...)`
-3. `transport_plate("hamilton", ..., ...)`
+3. Poll `get_hamilton_status()` until the Hamilton executor is idle again
+4. `transport_plate("hamilton", ..., ...)`
 
 ### Critical Hardware Smoke Test
 

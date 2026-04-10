@@ -1055,30 +1055,6 @@ class OrchestrationSystem:
             )
         return status
 
-    async def _poll_hamilton_execution(self, action_id: str, timeout: int) -> dict:
-        """Poll the Hamilton executor until ``action_id`` reaches a terminal state."""
-
-        service = await self._get_hamilton_executor_proxy()
-        if service is None:
-            raise RuntimeError(
-                f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
-            )
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout + 60
-        while loop.time() < deadline:
-            status = await service.poll_status(n_lines=100)
-            if status.get("busy"):
-                await asyncio.sleep(2)
-                continue
-            if status.get("last_action_id") == action_id:
-                return status
-            await asyncio.sleep(1)
-
-        raise TimeoutError(
-            f"Timed out waiting for Hamilton execution '{action_id}' to finish reporting status."
-        )
-
     @schema_function(skip_self=True)
     async def get_hamilton_status(self):
         """Return Hamilton executor connectivity and the current executor status."""
@@ -1115,7 +1091,7 @@ class OrchestrationSystem:
         script_content: str,
         timeout: int = 3600,
     ):
-        """Execute a Hamilton script on the existing executor service without transport."""
+        """Start a Hamilton script on the existing executor service without transport."""
 
         if not isinstance(script_content, str) or not script_content.strip():
             return {"success": False, "message": "script_content must be a non-empty string."}
@@ -1153,18 +1129,12 @@ class OrchestrationSystem:
                         response["state"] = "busy"
                     return response
 
-                action_id = start_result["action_id"]
-                execution_result = await self._poll_hamilton_execution(action_id, timeout)
-
             return {
-                "success": bool(execution_result.get("success")),
-                "message": (
-                    "Hamilton protocol completed successfully."
-                    if execution_result.get("success")
-                    else "Hamilton protocol finished with an error."
-                ),
+                "success": True,
+                "message": "Hamilton protocol accepted and started.",
                 "start_result": start_result,
-                "execution_result": execution_result,
+                "action_id": start_result.get("action_id"),
+                "state": start_result.get("status", "running"),
                 "hamilton_status": await self.get_hamilton_status(),
                 "runtime_status": await self.get_runtime_status(),
             }

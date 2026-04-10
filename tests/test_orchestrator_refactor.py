@@ -59,15 +59,6 @@ class FakeHamiltonExecutor:
         self.start_calls.append({"script_content": script_content, "timeout": timeout})
         return dict(self.start_result)
 
-    async def poll_status(self, n_lines=100):
-        self.poll_calls += 1
-        if self.poll_results:
-            result = dict(self.poll_results.pop(0))
-            self.status = dict(result)
-            return result
-        return dict(self.status)
-
-
 class FakeIncubator:
     def __init__(self, location="incubator_slot"):
         self.location = location
@@ -233,15 +224,12 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
                 "action_id": "action-123",
                 "status": "running",
             },
-            poll_results=[
-                {"busy": True, "last_action_id": None, "success": False},
-                {
-                    "busy": False,
-                    "last_action_id": "action-123",
-                    "success": True,
-                    "output": "protocol complete",
-                },
-            ],
+            status={
+                "busy": True,
+                "current_action_id": "action-123",
+                "last_action_id": None,
+                "success": False,
+            },
         )
         orchestrator.hamilton_executor = executor
 
@@ -258,8 +246,9 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response["success"])
         self.assertEqual(executor.start_calls[0]["script_content"], "print('run protocol')")
         self.assertEqual(executor.start_calls[0]["timeout"], 3600)
-        self.assertEqual(response["execution_result"]["last_action_id"], "action-123")
-        self.assertGreaterEqual(executor.poll_calls, 2)
+        self.assertEqual(response["action_id"], "action-123")
+        self.assertEqual(response["state"], "running")
+        self.assertTrue(response["hamilton_status"]["executor_status"]["busy"])
 
     async def test_hamilton_execution_lock_does_not_block_unrelated_microscope_resource(self):
         orchestrator = orchestrator_module.OrchestrationSystem()
