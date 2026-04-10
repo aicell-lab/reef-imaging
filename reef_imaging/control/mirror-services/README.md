@@ -1,6 +1,6 @@
 # REEF Imaging Mirror Services
 
-This directory contains mirror services that proxy requests from the cloud server (https://hypha.aicell.io) to the local REEF imaging services. These services allow remote control of the microscope, robotic arm, and incubator while maintaining local control and safety measures.
+This directory contains mirror services that proxy requests from the cloud server (https://hypha.aicell.io) to the local REEF imaging services. These services allow remote control of the microscope, robotic arm, incubator, and Hamilton executor while maintaining local control and safety measures.
 
 ## Services Overview
 ![mirror sercies flow](docs/mirror_services_flow.png)
@@ -13,6 +13,11 @@ This directory contains mirror services that proxy requests from the cloud serve
    - Mirrors the local incubator control service
    - Handles sample storage and environmental control
    - Monitors temperature, CO2 levels, and sample status
+
+3. **Mirror Hamilton Service** (`mirror_hamilton.py`)
+   - Mirrors the local `hamilton-script-executor` service
+   - Exposes Hamilton execution/status methods remotely
+   - Keeps Hamilton service access aligned with the existing cloud-to-local mirror pattern
 
 **Note**: The microscope control mirror service (`mirror_squid_control.py`) has been removed. The `squid_control` package now includes built-in mirror functionality, eliminating the need for a separate mirror service. See the main project README for information on using the `squid_control` package with mirror features.
 
@@ -45,6 +50,9 @@ python mirror_robotic_arm.py
 
 # Terminal 2: Start incubator mirror service
 python mirror_incubator.py
+
+# Terminal 3: Start Hamilton mirror service
+python mirror_hamilton.py
 ```
 
 **Note**: The microscope mirror service is no longer needed as the `squid_control` package includes built-in mirror functionality.
@@ -59,6 +67,9 @@ python mirror_robotic_arm.py --cloud-service-id "my-mirror-robotic-arm" --local-
 
 # Custom incubator service IDs
 python mirror_incubator.py --cloud-service-id "my-mirror-incubator" --local-service-id "my-local-incubator"
+
+# Custom Hamilton service IDs
+python mirror_hamilton.py --cloud-service-id "my-mirror-hamilton" --local-service-id "my-local-hamilton"
 ```
 
 **Note**: Microscope mirror service customization is now handled through the `squid_control` package configuration.
@@ -71,10 +82,12 @@ For production use, you can run services in the background using `nohup` or `scr
 # Using nohup
 nohup python mirror_robotic_arm.py > robotic_arm.log 2>&1 &
 nohup python mirror_incubator.py > incubator.log 2>&1 &
+nohup python mirror_hamilton.py > hamilton.log 2>&1 &
 
 # Using screen (install with: sudo apt-get install screen)
 screen -S robotic_arm -dm python mirror_robotic_arm.py
 screen -S incubator -dm python mirror_incubator.py
+screen -S hamilton -dm python mirror_hamilton.py
 ```
 
 **Note**: Microscope mirror service is no longer needed as the `squid_control` package handles mirroring internally.
@@ -95,6 +108,7 @@ screen -S incubator -dm python mirror_incubator.py
 
 - Mirror Robotic Arm Service: `robotic-arm-control`
 - Mirror Incubator Service: `incubator-control`
+- Mirror Hamilton Service: `hamilton-script-executor`
 
 **Note**: Microscope mirror service ID is now managed by the `squid_control` package.
 
@@ -103,6 +117,7 @@ screen -S incubator -dm python mirror_incubator.py
 Each service maintains its own log file:
 - `mirror_robotic_arm_service.log`
 - `mirror_incubator_service.log`
+- `mirror_hamilton_service.log`
 
 **Note**: Microscope mirror service logging is now handled by the `squid_control` package.
 

@@ -274,6 +274,7 @@ class HardwareSmokeTestRunner:
     def _prompt_for_test_mode(self) -> str:
         """Ask user to select test mode."""
         self._record("Select test mode:")
+        self._record("Hamilton smoke-test modes validate transport only; they do not execute Hamilton liquid-handling scripts.")
         self._record("  1. Microscope only (default) - test incubator <-> microscope transport and scanning")
         self._record("  2. Hamilton only (incubator) - test incubator <-> Hamilton transport")
         self._record("  3. Hamilton only (microscope) - test microscope <-> Hamilton transport")

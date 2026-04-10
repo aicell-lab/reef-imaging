@@ -6,7 +6,7 @@ A platform for automated microscope control, image acquisition, data management,
 
 REEF Imaging provides a comprehensive system for automated microscopy workflows, integrating hardware control, cloud-based data management, and real-time monitoring. The system enables fully automated time-lapse experiments with:
 
-- **Hardware Control**: Seamless integration with SQUID microscopes, Dorna robotic arms, and Cytomat incubators
+- **Hardware Control**: Seamless integration with SQUID microscopes, Dorna robotic arms, Cytomat incubators, and the Hamilton liquid handler
 - **Image Acquisition**: Multi-channel fluorescence and brightfield imaging with automated well plate scanning
 - **Data Management**: Cloud-based storage and organization through the Hypha platform with artifact management
 - **Orchestration**: Task-driven workflow automation with real-time status tracking and error recovery
@@ -22,7 +22,7 @@ The REEF Imaging system is built on a modular architecture with four main layers
 
 1. **Orchestration Layer** (`orchestrator.py`)
    - Task scheduling and management from `config.json`
-   - Hardware coordination (microscope, robotic arm, incubator)
+   - Hardware coordination (microscope, robotic arm, incubator, Hamilton executor)
    - Admission-controlled busy rejection for transport and scan conflicts
    - Health monitoring with automatic reconnection
    - Critical operation protection and error recovery
@@ -35,7 +35,7 @@ The REEF Imaging system is built on a modular architecture with four main layers
 
 3. **Mirror Service Layer** (`mirror-services/`)
    - Cloud-to-local service proxies for remote operation
-   - Automatic method mirroring for robotic arm and incubator
+   - Automatic method mirroring for robotic arm, incubator, and Hamilton executor
    - Health checks with auto-reconnection
    - Note: Microscope has built-in mirror functionality
 
@@ -50,11 +50,11 @@ The REEF Imaging system is built on a modular architecture with four main layers
 ```
 Cloud (Hypha Server: hypha.aicell.io)
     ↕️ (RPC)
-Mirror Services (robotic arm, incubator)
+Mirror Services (robotic arm, incubator, Hamilton executor)
     ↕️ (RPC)
 Local Hypha Server (reef.dyn.scilifelab.se:9527)
     ↕️ (RPC)
-Orchestrator ← Hardware Services (microscope, robotic arm, incubator)
+Orchestrator ← Hardware Services (microscope, robotic arm, incubator, Hamilton executor)
     ↕️
 Physical Hardware
 ```
@@ -75,7 +75,7 @@ Check out our system demonstration video:
     - **dorna-control/** - Control for Dorna robotic arm
     - **cytomat-control/** - Control for Cytomat incubator
     - **squid-control/** - Control for SQUID microscope (includes built-in mirror functionality)
-    - **mirror-services/** - Services for mirroring data between cloud and local systems (robotic arm and incubator only)
+    - **mirror-services/** - Services for mirroring data between cloud and local systems (robotic arm, incubator, and Hamilton executor)
   - **hypha_tools/** - Utilities for working with the Hypha platform
     - **artifact_manager/** - Tools for interacting with Hypha's artifact management system
     - **automated_treatment_uploader.py** - Uploads time-lapse experiment data
@@ -163,6 +163,18 @@ The orchestrator will:
 4. Begin processing pending time points
 5. Monitor service health and automatically reconnect on failures
 
+Hamilton-specific orchestrator contract:
+
+- `transport_plate(from_device, to_device, slot=...)` remains the only physical movement API, including routes touching `hamilton`
+- `get_hamilton_status()` reports Hamilton executor connectivity, executor status, and active Hamilton-related operations
+- `run_hamilton_protocol(script_content, timeout=3600)` executes Hamilton script content only and assumes the plate is already on Hamilton
+
+Recommended composed workflow:
+
+1. `transport_plate(..., "hamilton", ...)`
+2. `run_hamilton_protocol(script_content=...)`
+3. `transport_plate("hamilton", ..., ...)`
+
 ### Critical Hardware Smoke Test
 
 Use the hardware smoke test before relying on a new lab setup, after device integration changes, and after safety-critical orchestration changes.
@@ -184,6 +196,8 @@ The CLI will:
 - Stop immediately on the first failure
 - Offer emergency actions to cancel a scan or halt the robot
 - Save a timestamped report under `hardware_test_reports/`
+
+Hamilton smoke-test modes validate transport only. They do not execute Hamilton liquid-handling scripts; use `run_hamilton_protocol(...)` separately once the plate is already on Hamilton.
 
 ### Starting Individual Hardware Services
 
@@ -210,6 +224,7 @@ python start_hypha_service_squid_control.py --local
 cd reef_imaging/control/mirror-services
 python mirror_incubator.py
 python mirror_robotic_arm.py
+python mirror_hamilton.py
 ```
 
 ### Starting Lab Camera Services (Linux)
@@ -251,7 +266,8 @@ The system integrates with multiple hardware components:
 - **Microscope Control**: Manages SQUID microscope for imaging, stage positioning, and illumination (includes built-in mirror functionality)
 - **Robotic Arm Control**: Handles sample transfer between microscope and incubator
 - **Incubator Control**: Manages sample storage and environmental conditions
-- **Mirror Services**: Proxies requests between cloud and local systems (for robotic arm and incubator only)
+- **Hamilton Executor**: Runs Hamilton Python protocols through the existing `hamilton-script-executor` service
+- **Mirror Services**: Proxies requests between cloud and local systems (for robotic arm, incubator, and Hamilton executor)
 
 ### Using the squid_control Package
 
