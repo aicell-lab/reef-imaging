@@ -29,7 +29,7 @@ The main orchestration engine that coordinates all hardware and manages time-lap
 - `get_all_imaging_tasks()` — list all tasks from `config.json`
 - `get_runtime_status()` — active operations, held resources, connected devices, critical services
 - `cancel_microscope_scan()` / `halt_robotic_arm()` — emergency operator controls
-- `get_lab_video_stream_urls()` — public Hypha URLs for all camera feeds
+- `get_lab_video_stream_urls()` — public Hypha URLs for all current camera feeds, including the Hamilton feed when configured
 - `process_timelapse_offline_api(experiment_id)` — offline stitch + upload
 - `scan_microscope_only_api(microscope_id, scan_config)` — scan without transport
 

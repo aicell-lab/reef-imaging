@@ -2795,11 +2795,12 @@ class OrchestrationSystem:
 
     @schema_function(skip_self=True)
     async def get_lab_video_stream_urls(self):
-        """Returns public Hypha URLs for all lab video stream services (lab cameras)."""
+        """Returns public Hypha URLs for current lab video stream apps, including Hamilton when exposed."""
         base = f"{self.orchestrator_hypha_server_url}/{self.workspace}/apps"
         return {
             "reef-lab-camera-1": f"{base}/reef-lab-camera-1",
             "reef-lab-camera-2": f"{base}/reef-lab-camera-2",
+            "reef-hamilton-feed": f"{base}/reef-hamilton-feed",
         }
 
     @schema_function(skip_self=True)

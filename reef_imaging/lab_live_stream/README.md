@@ -98,4 +98,7 @@ Requires `pyrealsense2`. Time-lapses saved to `/media/reef/harddisk/dorna_video`
 
 ## Getting Stream URLs
 
-Use the orchestrator tool `get_lab_video_stream_urls` to retrieve all current public Hypha URLs for every stream service.
+Use the orchestrator tool `get_lab_video_stream_urls` to retrieve all current
+public Hypha URLs for every stream service. On the current deployment this can
+include the Hamilton feed in addition to the lab camera services documented
+here.

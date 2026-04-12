@@ -241,7 +241,9 @@ sudo systemctl start lab-cameras
 sudo systemctl start lab-cameras-watchdog
 ```
 
-Live stream URLs can be retrieved via the orchestrator tool `get_lab_video_stream_urls`.
+Live stream URLs should be retrieved via the orchestrator tool
+`get_lab_video_stream_urls`. On the current deployment this mapping can include
+the lab cameras and the Hamilton camera feed.
 See `reef_imaging/lab_live_stream/README.md` for full setup and watchdog instructions.
 
 ## Environment Setup
