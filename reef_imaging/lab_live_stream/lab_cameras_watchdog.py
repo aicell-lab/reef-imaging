@@ -12,11 +12,13 @@ Designed to run as a systemd service on the Linux workstation:
 
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
 
 import httpx
+import psutil
 
 BASE_URL = "https://hypha.aicell.io/reef-imaging/apps"
 CAMERA_SERVICE_IDS = ["reef-lab-camera-1", "reef-lab-camera-2"]
@@ -48,21 +50,44 @@ def check_health(service_id: str) -> bool:
     return False
 
 
+def _find_lab_cameras_pid() -> int | None:
+    """Find the PID of the running lab_cameras.py process."""
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = proc.info["cmdline"] or []
+            if any("lab_cameras.py" in arg for arg in cmdline):
+                return proc.info["pid"]
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return None
+
+
 def restart_service():
-    """Restart the Linux systemd service for lab cameras."""
-    logging.info("Restarting systemd service: %s", LINUX_SERVICE_NAME)
+    """Restart the lab cameras process."""
+    logging.info("Restarting lab cameras process")
+
+    # First try sudo (if configured via sudoers)
     result = subprocess.run(
-        ["systemctl", "restart", LINUX_SERVICE_NAME],
+        ["sudo", "-n", "systemctl", "restart", LINUX_SERVICE_NAME],
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
-        logging.error(
-            "systemctl restart %s failed (code %s): %s",
-            LINUX_SERVICE_NAME, result.returncode, result.stderr.strip(),
-        )
-    else:
+    if result.returncode == 0:
         logging.info("systemctl restart %s succeeded", LINUX_SERVICE_NAME)
+        time.sleep(15)
+        return
+
+    # Fallback: signal the process directly so systemd treats it as a failure
+    pid = _find_lab_cameras_pid()
+    if pid is not None:
+        logging.info("Sending SIGKILL to lab-cameras PID %s", pid)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError as e:
+            logging.error("Failed to kill PID %s: %s", pid, e)
+    else:
+        logging.warning("No lab_cameras.py process found")
+
     # Wait for Hypha to deregister old services before the new ones come up
     time.sleep(15)
 

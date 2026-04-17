@@ -247,7 +247,7 @@ class IncubatorService:
             # Don't raise the exception to prevent service startup failure
 
         # Start the health check task
-        #asyncio.create_task(self.check_service_health())
+        asyncio.create_task(self.check_service_health())
 
     async def setup(self):
         if not self.simulation:
