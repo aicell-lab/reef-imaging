@@ -1,7 +1,8 @@
 """Task scheduling and time-lapse orchestration mixin."""
 import asyncio
 from datetime import datetime
-from .core import logger
+from hypha_rpc import connect_to_server
+from .core import logger, CONFIG_READ_INTERVAL, ORCHESTRATOR_LOOP_SLEEP
 from reef_imaging.orchestration import ResourceBusyError
 
 

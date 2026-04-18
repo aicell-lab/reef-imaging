@@ -1,6 +1,7 @@
 """Health check and connection management mixin."""
 import asyncio
 import sys
+from hypha_rpc import connect_to_server
 from .core import logger, HamiltonBusyError
 
 

@@ -31,7 +31,13 @@ REEF Imaging is an automated microscopy platform for biological time-lapse exper
 ```
 reef-imaging/
 ├── reef_imaging/                      # Main Python package
-│   ├── orchestrator.py                # Main orchestration engine (~2100 lines)
+│   ├── orchestrator/                  # Orchestration package (6 modules)
+│   │   ├── __init__.py                # Assembles mixins; entry point
+│   │   ├── core.py                    # Base class: init, config I/O, admission
+│   │   ├── health.py                  # Health checks, reconnection logic
+│   │   ├── transport.py               # Plate transport operations
+│   │   ├── tasks.py                   # Time-lapse scheduling, cycles
+│   │   └── api.py                     # @schema_function Hypha endpoints
 │   ├── config.json                    # Task and microscope configuration
 │   ├── control/                       # Hardware control modules
 │   │   ├── cytomat-control/           # Cytomat incubator control
@@ -339,10 +345,8 @@ When modifying robotic arm, incubator, or orchestrator code, restart the respect
 
 ### Start Orchestrator
 ```bash
-cd reef_imaging
-python orchestrator.py  # Production (cloud mode)
-python orchestrator.py --local  # Local development
-python orchestrator_simulation.py --local  # No hardware simulation
+python -m reef_imaging  # Production (auto-connects local + cloud)
+python -m reef_imaging.orchestrator_simulation  # No hardware simulation
 ```
 
 ### Critical Hardware Smoke Test
@@ -487,6 +491,7 @@ os.replace('config.json.tmp', 'config.json')
 | `robotic_arm_service.log` | Robotic arm control |
 | `mirror_incubator_service.log` | Incubator mirror |
 | `mirror_robotic_arm_service.log` | Robotic arm mirror |
+| `mirror_hamilton_service.log` | Hamilton mirror |
 
 ### Local Test URLs
 ```
@@ -562,11 +567,11 @@ finally:
 ```
 Cloud (Hypha: hypha.aicell.io)
     ↕️ (RPC)
-Mirror Services (robotic arm, incubator)
+Mirror Services (robotic arm, incubator, Hamilton)
     ↕️ (RPC)
 Local Hypha Server (reef.dyn.scilifelab.se:9527)
     ↕️ (RPC)
-Orchestrator ← Hardware Services (microscope, robotic arm, incubator)
+Orchestrator ← Hardware Services (microscope, robotic arm, incubator, Hamilton)
     ↕️
 Physical Hardware
 ```

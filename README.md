@@ -20,11 +20,12 @@ REEF Imaging provides a comprehensive system for automated microscopy workflows,
 
 The REEF Imaging system is built on a modular architecture with four main layers:
 
-1. **Orchestration Layer** (`orchestrator.py`)
+1. **Orchestration Layer** (`reef_imaging/orchestrator/`)
    - Task scheduling and management from `config.json`
    - Hardware coordination (microscope, robotic arm, incubator, Hamilton executor)
    - Admission-controlled busy rejection for transport and scan conflicts
    - Health monitoring with automatic reconnection
+   - Cloud connection health monitoring with auto-reconnect
    - Critical operation protection and error recovery
 
 2. **Hardware Control Layer** (`control/`)
@@ -69,7 +70,7 @@ Check out our system demonstration video:
 ## Project Structure
 
 - **reef_imaging/** - Main package
-  - **orchestrator.py** - Main orchestration system
+  - **orchestrator/** - Main orchestration package (6 modules: core, health, transport, tasks, api, __init__)
   - **hypha_service.py** - Hypha service integration
   - **control/** - Hardware control modules
     - **dorna-control/** - Control for Dorna robotic arm
@@ -146,18 +147,18 @@ python -m reef_imaging.hypha_service
 
 **Production Mode** (with real hardware):
 ```bash
-cd reef_imaging
-python orchestrator.py
+python -m reef_imaging
 ```
 
-For local development and testing:
+The orchestrator auto-connects to both the local Hypha server (for hardware services) and the cloud Hypha server (to register its own service). No CLI flags are required.
+
+For simulation testing (no hardware):
 ```bash
-# Simulates hardware responses for safe testing
-python orchestrator_simulation.py --local
+python -m reef_imaging.orchestrator_simulation
 ```
 
 The orchestrator will:
-1. Connect to the Hypha server (local or cloud)
+1. Connect to the local and cloud Hypha servers
 2. Discover and connect to hardware services
 3. Load tasks from `config.json`
 4. Begin processing pending time points

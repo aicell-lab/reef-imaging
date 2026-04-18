@@ -17,6 +17,7 @@ server = await connect_to_server({
     "server_url": "https://hypha.aicell.io",
     "workspace": "reef-imaging",
     "token": os.getenv("REEF_WORKSPACE_TOKEN"),
+    "ping_interval": 30,
 })
 svc_info = await server.register_service({
     "id": "service-id",
@@ -32,7 +33,7 @@ Public URL pattern: `https://hypha.aicell.io/reef-imaging/apps/{service_id}`
 
 ### Orchestrator tools
 
-Tools exposed by the orchestrator (`orchestrator.py`) are decorated with `@schema_function(skip_self=True)` and registered in `service_api` inside `_register_self_as_hypha_service()`. Always add both the method and the `service_api` dict entry when adding a new tool.
+Tools exposed by the orchestrator (`reef_imaging/orchestrator/`) are decorated with `@schema_function(skip_self=True)` and registered in `service_api` inside `_register_self_as_hypha_service()`. Always add both the method and the `service_api` dict entry when adding a new tool. The orchestrator is split into mixins (`core.py`, `health.py`, `transport.py`, `tasks.py`, `api.py`) assembled in `__init__.py`.
 
 Orchestrator service visibility is `"protected"`. Camera services are `"public"`.
 
@@ -58,13 +59,20 @@ Orchestrator service visibility is `"protected"`. Camera services are `"public"`
 | Lab camera 1 | `reef-lab-camera-1` | reef-server |
 | Lab camera 2 | `reef-lab-camera-2` | reef-server |
 | RealSense arm cam | `reef-realsense-feed` | reef-server |
+| Hamilton Executor | `hamilton-script-executor` | Hamilton workstation via local Hypha / cloud mirror |
 
 
 ## File structure highlights
 
 ```
 reef_imaging/
-├── orchestrator.py              # Main task scheduler + Hypha tool registrations
+├── orchestrator/                # Orchestration package (6 modules)
+│   ├── __init__.py              # Assembles mixins; entry point via `python -m reef_imaging`
+│   ├── core.py                  # Base class: init, config I/O, admission helpers
+│   ├── health.py                # Health checks, reconnection logic
+│   ├── transport.py             # Plate transport operations
+│   ├── tasks.py                 # Time-lapse scheduling, cycle execution
+│   └── api.py                   # @schema_function Hypha endpoints
 ├── hypha_service.py
 ├── lab_live_stream/
 │   ├── lab_cameras.py           # Auto-detects + registers 2 USB lab cameras
@@ -75,7 +83,7 @@ reef_imaging/
 │   ├── squid-control/           # SQUID microscope (git submodule / separate package)
 │   ├── dorna-control/           # Dorna robotic arm
 │   ├── cytomat-control/         # Cytomat incubator
-│   └── mirror-services/         # Cloud↔local proxies for arm + incubator
+│   └── mirror-services/         # Cloud↔local proxies for arm, incubator, Hamilton
 └── hypha_tools/
     ├── artifact_manager/
     ├── automated_treatment_uploader.py

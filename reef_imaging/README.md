@@ -6,19 +6,29 @@ This is the main Python package for the REEF Imaging platform, containing orches
 
 ### 1. Orchestration System
 
-#### `orchestrator.py`
-The main orchestration engine that coordinates all hardware and manages time-lapse experiments.
+#### `orchestrator/` Package
+The main orchestration engine, split into 6 modules for maintainability:
+
+| Module | Purpose |
+|--------|---------|
+| `__init__.py` | Assembles mixins into `OrchestrationSystem`; entry point |
+| `core.py` | Base class: init, config I/O, admission helpers |
+| `health.py` | Service health checks, reconnection logic |
+| `transport.py` | Plate transport between all devices |
+| `tasks.py` | Time-lapse scheduling, cycle execution |
+| `api.py` | All `@schema_function` Hypha endpoints |
 
 **Core Classes**:
-- `OrchestrationSystem`: Main system class with task management and service coordination
+- `OrchestrationSystem`: Main system class assembled from transport, API, health, and task mixins
 
 **Key Features**:
 - Task loading and scheduling from `config.json`
-- Service proxy management (microscope, robotic arm, incubator)
+- Service proxy management (microscope, robotic arm, incubator, Hamilton executor)
 - Admission-controlled busy rejection for conflicting transport and scan operations
 - Health monitoring with automatic reconnection (30-second intervals)
 - Critical operation protection to prevent mid-operation shutdowns
 - Atomic config writes (`config.json.tmp` → `config.json`) to prevent corruption
+- Cloud connection health monitoring with auto-reconnect
 - Comprehensive error handling and logging
 
 **Exposed Hypha Tool APIs** (decorated with `@schema_function`):
@@ -32,6 +42,9 @@ The main orchestration engine that coordinates all hardware and manages time-lap
 - `get_lab_video_stream_urls()` — public Hypha URLs for all current camera feeds, including the Hamilton feed when configured
 - `process_timelapse_offline_api(experiment_id)` — offline stitch + upload
 - `scan_microscope_only_api(microscope_id, scan_config)` — scan without transport
+- `transport_plate(from_device, to_device, slot)` — unified transport between any two devices
+- `get_hamilton_status()` — Hamilton executor connectivity and status
+- `run_hamilton_protocol(script_content, timeout=3600)` — start Hamilton liquid-handling script
 
 #### `orchestrator_simulation.py`
 Simulation version for testing without hardware. Provides mock responses for all hardware operations.
@@ -80,6 +93,7 @@ External package with built-in mirror functionality. See: https://github.com/aic
 **Files**:
 - `mirror_robotic_arm.py` — Cloud-to-local proxy for robotic arm
 - `mirror_incubator.py` — Cloud-to-local proxy for incubator
+- `mirror_hamilton.py` — Cloud-to-local proxy for Hamilton executor
 
 Note: The microscope no longer needs a mirror service — `squid_control` includes built-in mirror functionality.
 
@@ -170,20 +184,15 @@ The orchestrator reads from `reef_imaging/config.json`. This file is gitignored 
 
 ### Starting the Orchestrator
 
-**Production** (cloud operation):
 ```bash
-cd reef_imaging
-python orchestrator.py
+python -m reef_imaging
 ```
 
-**Local Development**:
-```bash
-python orchestrator.py --local
-```
+The orchestrator auto-connects to both the local Hypha server (for hardware services) and the cloud Hypha server (to register its own service). No CLI flags are required.
 
 **Simulation** (no hardware):
 ```bash
-python orchestrator_simulation.py --local
+python -m reef_imaging.orchestrator_simulation
 ```
 
 ### Critical Hardware Smoke Test
@@ -219,6 +228,7 @@ python start_hypha_service_robotic_arm.py
 cd reef_imaging/control/mirror-services
 python mirror_incubator.py &
 python mirror_robotic_arm.py &
+python mirror_hamilton.py &
 ```
 
 ## Logging & Monitoring
@@ -232,6 +242,7 @@ Rotating log files (10 MB max, 5 backups):
 | `robotic_arm_service.log` | Robotic arm control |
 | `mirror_incubator_service.log` | Incubator mirror |
 | `mirror_robotic_arm_service.log` | Robotic arm mirror |
+| `mirror_hamilton_service.log` | Hamilton mirror |
 
 - Health checks every 30 seconds with automatic reconnection
 - Critical operation protection prevents shutdown mid-transfer
