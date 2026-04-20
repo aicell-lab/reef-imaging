@@ -1,5 +1,6 @@
 """Task scheduling and time-lapse orchestration mixin."""
 import asyncio
+import copy
 from datetime import datetime
 from hypha_rpc import connect_to_server
 from .core import logger, CONFIG_READ_INTERVAL, ORCHESTRATOR_LOOP_SLEEP
@@ -336,7 +337,7 @@ class TaskMixin:
                     logger.info(f"Flexible scan config: {len(scan_config['positions'])} positions")
                 
                 logger.info(f"Sending scan_config to microscope: saved_data_type={scan_config['saved_data_type']}")
-                scan_result = await asyncio.wait_for(
+                await asyncio.wait_for(
                     microscope_service.scan_start(config=scan_config), timeout=60
                 )
 
@@ -566,4 +567,3 @@ class TaskMixin:
 
         if not registration_succeeded:
             logger.warning("Orchestrator service was not registered on any Hypha endpoint.")
-

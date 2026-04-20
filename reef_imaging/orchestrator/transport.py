@@ -234,7 +234,7 @@ class TransportMixin:
             await self._run_manual_transport_operation("load", slot, microscope_id)
             return {"success": True, "message": f"Load from slot {slot} to {microscope_id} completed."}
         except ResourceBusyError as busy_error:
-            return self._busy_response(f"Load request rejected - orchestrator is busy.", busy_error)
+            return self._busy_response("Load request rejected - orchestrator is busy.", busy_error)
         except Exception as e:
             logger.error(f"Load operation failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
@@ -247,7 +247,7 @@ class TransportMixin:
             await self._run_manual_transport_operation("unload", slot, microscope_id)
             return {"success": True, "message": f"Unload from {microscope_id} to slot {slot} completed."}
         except ResourceBusyError as busy_error:
-            return self._busy_response(f"Unload request rejected - orchestrator is busy.", busy_error)
+            return self._busy_response("Unload request rejected - orchestrator is busy.", busy_error)
         except Exception as e:
             logger.error(f"Unload operation failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
@@ -325,7 +325,7 @@ class TransportMixin:
             
             return {"success": True, "message": f"Transport from {from_microscope} to {to_microscope} completed."}
         except ResourceBusyError as busy_error:
-            return self._busy_response(f"Microscope-to-microscope transport request rejected - orchestrator is busy.", busy_error)
+            return self._busy_response("Microscope-to-microscope transport request rejected - orchestrator is busy.", busy_error)
         except Exception as e:
             logger.error(f"Microscope-to-microscope transport failed: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
@@ -850,4 +850,3 @@ class TransportMixin:
             self.in_critical_operation = False
             logger.info("CRITICAL OPERATION END: Robotic arm unload complete")
             self._unmark_critical_services(critical_services)
-

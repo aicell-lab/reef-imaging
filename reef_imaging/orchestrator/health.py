@@ -2,7 +2,7 @@
 import asyncio
 import sys
 from hypha_rpc import connect_to_server
-from .core import logger, HamiltonBusyError
+from .core import logger
 
 
 class HealthMixin:
@@ -159,7 +159,7 @@ class HealthMixin:
             if service_type == 'incubator':
                 logger.info(f"Refreshing incubator service proxy ({self.incubator_id})...")
                 self.incubator = await self.local_server_connection.get_service(self.incubator_id)
-                logger.info(f"Incubator service proxy refreshed.")
+                logger.info("Incubator service proxy refreshed.")
 
             elif service_type == 'microscope':
                 if not service_id:
@@ -172,7 +172,7 @@ class HealthMixin:
             elif service_type == 'robotic_arm':
                 logger.info(f"Refreshing robotic arm service proxy ({self.robotic_arm_id})...")
                 self.robotic_arm = await self.local_server_connection.get_service(self.robotic_arm_id)
-                logger.info(f"Robotic arm service proxy refreshed.")
+                logger.info("Robotic arm service proxy refreshed.")
             elif service_type == 'hamilton':
                 logger.info(f"Refreshing Hamilton executor service proxy ({self.hamilton_executor_id})...")
                 self.hamilton_executor = await self.local_server_connection.get_service(self.hamilton_executor_id)
@@ -388,4 +388,3 @@ class HealthMixin:
                 logger.error(f"Error disconnecting stable server connection: {e}")
                 
         logger.info("Disconnect process completed.")
-

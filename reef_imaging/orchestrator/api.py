@@ -1,8 +1,11 @@
 """Hypha API endpoint mixin (all @schema_function methods)."""
 import asyncio
 from datetime import datetime
+import json
+import os
+
 from hypha_rpc.utils.schema import schema_function
-from .core import logger, HamiltonBusyError
+from .core import logger
 from reef_imaging.orchestration import ResourceBusyError
 
 
@@ -215,16 +218,19 @@ class APIMixin:
         new_settings["imaging_completed"] = not has_pending
         new_settings["imaging_started"] = has_imaged or (not has_pending and has_imaged)
 
+        config_file_path = self._get_config_file_path()
+        config_file_path_tmp = self._get_config_file_path_tmp()
+
         async with self._config_lock:
             try:
                 config_data = {"samples": []}
                 try:
-                    with open(CONFIG_FILE_PATH, 'r') as f:
+                    with open(config_file_path, 'r') as f:
                         config_data = json.load(f)
                 except FileNotFoundError:
-                    logger.warning(f"{CONFIG_FILE_PATH} not found. Will create a new one.")
+                    logger.warning(f"{config_file_path} not found. Will create a new one.")
                 except (json.JSONDecodeError, OSError) as e:
-                    logger.warning(f"{CONFIG_FILE_PATH} is corrupted or unreadable: {e}. Will create a new one.")
+                    logger.warning(f"{config_file_path} is corrupted or unreadable: {e}. Will create a new one.")
                 
                 if "samples" not in config_data or not isinstance(config_data["samples"], list):
                      config_data["samples"] = []
@@ -261,10 +267,10 @@ class APIMixin:
                     }
                     config_data["samples"].append(new_task_entry)
 
-                with open(CONFIG_FILE_PATH_TMP, 'w') as f:
+                with open(config_file_path_tmp, 'w') as f:
                     json.dump(config_data, f, indent=4)
-                os.replace(CONFIG_FILE_PATH_TMP, CONFIG_FILE_PATH)
-                logger.info(f"Task '{task_name}' processed (added/updated) in {CONFIG_FILE_PATH}.")
+                os.replace(config_file_path_tmp, config_file_path)
+                logger.info(f"Task '{task_name}' processed (added/updated) in {config_file_path}.")
 
             except Exception as e:
                 logger.error(f"Failed to add/update imaging task '{task_name}' in config: {e}", exc_info=True)
@@ -286,31 +292,34 @@ class APIMixin:
                 "state": "busy",
             }
 
+        config_file_path = self._get_config_file_path()
+        config_file_path_tmp = self._get_config_file_path_tmp()
+
         async with self._config_lock:
             try:
                 config_data = {"samples": []}
                 try:
-                    with open(CONFIG_FILE_PATH, 'r') as f:
+                    with open(config_file_path, 'r') as f:
                         config_data = json.load(f)
                 except (FileNotFoundError, json.JSONDecodeError):
-                    logger.warning(f"{CONFIG_FILE_PATH} not found or corrupted. Cannot delete task.")
-                    return {"success": False, "message": f"{CONFIG_FILE_PATH} not found or corrupted."}
+                    logger.warning(f"{config_file_path} not found or corrupted. Cannot delete task.")
+                    return {"success": False, "message": f"{config_file_path} not found or corrupted."}
 
                 if "samples" not in config_data or not isinstance(config_data["samples"], list):
-                    logger.warning(f"No 'samples' list in {CONFIG_FILE_PATH}. Cannot delete task.")
+                    logger.warning(f"No 'samples' list in {config_file_path}. Cannot delete task.")
                     return {"success": False, "message": "No 'samples' list in configuration."}
 
                 original_count = len(config_data["samples"])
                 config_data["samples"] = [task for task in config_data["samples"] if task.get("name") != task_name]
                 
                 if len(config_data["samples"]) == original_count:
-                    logger.warning(f"Task '{task_name}' not found in {CONFIG_FILE_PATH}. No deletion occurred.")
+                    logger.warning(f"Task '{task_name}' not found in {config_file_path}. No deletion occurred.")
                     return {"success": False, "message": f"Task '{task_name}' not found."}
 
-                with open(CONFIG_FILE_PATH_TMP, 'w') as f:
+                with open(config_file_path_tmp, 'w') as f:
                     json.dump(config_data, f, indent=4)
-                os.replace(CONFIG_FILE_PATH_TMP, CONFIG_FILE_PATH)
-                logger.info(f"Task '{task_name}' deleted from {CONFIG_FILE_PATH}.")
+                os.replace(config_file_path_tmp, config_file_path)
+                logger.info(f"Task '{task_name}' deleted from {config_file_path}.")
 
             except Exception as e:
                 logger.error(f"Failed to delete imaging task '{task_name}' from config: {e}", exc_info=True)
@@ -349,17 +358,18 @@ class APIMixin:
     @schema_function(skip_self=True)
     async def get_all_imaging_tasks(self):
         """Retrieves all imaging task configurations from config.json."""
-        logger.debug(f"Attempting to read all imaging tasks from {CONFIG_FILE_PATH}")
+        config_file_path = self._get_config_file_path()
+        logger.debug(f"Attempting to read all imaging tasks from {config_file_path}")
         async with self._config_lock:
             try:
-                with open(CONFIG_FILE_PATH, 'r') as f:
+                with open(config_file_path, 'r') as f:
                     config_data = json.load(f)
                 return config_data.get("samples", []) # Return the list of samples
             except FileNotFoundError:
-                logger.warning(f"{CONFIG_FILE_PATH} not found when trying to get all tasks.")
+                logger.warning(f"{config_file_path} not found when trying to get all tasks.")
                 return [] 
             except json.JSONDecodeError:
-                logger.error(f"Error decoding JSON from {CONFIG_FILE_PATH} when getting all tasks.")
+                logger.error(f"Error decoding JSON from {config_file_path} when getting all tasks.")
                 return []
             except Exception as e:
                 logger.error(f"Failed to get all imaging tasks: {e}", exc_info=True)
@@ -814,4 +824,3 @@ class APIMixin:
                 await self._update_task_state_and_write_config(linked_task_name, status="error")
             
             return {"success": False, "message": error_msg, "action_id": action_id}
-

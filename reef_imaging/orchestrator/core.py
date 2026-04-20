@@ -6,17 +6,16 @@ Task:
 3. Unload the plate from microscope to incubator
 """
 import asyncio
-from hypha_rpc import connect_to_server
-from hypha_rpc.utils.schema import schema_function
-import os
-import dotenv
-import logging
-import sys
-import logging.handlers
+import copy
 from datetime import datetime
 import json
-import copy
+import logging
+import logging.handlers
+import os
 from uuid import uuid4
+
+import dotenv
+from hypha_rpc import connect_to_server
 
 from reef_imaging.orchestration import (
     AdmissionRequest,
@@ -225,6 +224,16 @@ class OrchestrationSystemBase:
             "run_hamilton_protocol": self.run_hamilton_protocol,
         }
 
+    def _get_config_file_path(self) -> str:
+        import reef_imaging.orchestrator as orchestrator_module
+
+        return orchestrator_module.CONFIG_FILE_PATH
+
+    def _get_config_file_path_tmp(self) -> str:
+        import reef_imaging.orchestrator as orchestrator_module
+
+        return orchestrator_module.CONFIG_FILE_PATH_TMP
+
     async def _ensure_local_server_connection(self):
         if not self.local_token:
             logger.error("REEF_LOCAL_TOKEN not set. Cannot setup local connection.")
@@ -271,16 +280,17 @@ class OrchestrationSystemBase:
         new_task_configs = {}
         raw_settings_by_task = {}
         raw_config_data = None
+        config_file_path = self._get_config_file_path()
 
         async with self._config_lock:
             try:
-                with open(CONFIG_FILE_PATH, 'r') as f:
+                with open(config_file_path, 'r') as f:
                     raw_config_data = json.load(f)
             except FileNotFoundError:
-                logger.error(f"Configuration file {CONFIG_FILE_PATH} not found.")
+                logger.error(f"Configuration file {config_file_path} not found.")
                 raw_config_data = {"samples": []}
             except (json.JSONDecodeError, OSError) as e:
-                logger.error(f"Error reading {CONFIG_FILE_PATH}: {e}. Will not update tasks from file this cycle.")
+                logger.error(f"Error reading {config_file_path}: {e}. Will not update tasks from file this cycle.")
                 # Add a small delay to prevent rapid retries on file system errors
                 await asyncio.sleep(1)
                 return
@@ -290,7 +300,7 @@ class OrchestrationSystemBase:
             settings = sample_config_from_file.get("settings")
 
             if not task_name or not settings:
-                logger.warning(f"Found a sample configuration without a name or settings in {CONFIG_FILE_PATH}. Skipping: {sample_config_from_file}")
+                logger.warning(f"Found a sample configuration without a name or settings in {config_file_path}. Skipping: {sample_config_from_file}")
                 continue
 
             try:
@@ -465,7 +475,7 @@ class OrchestrationSystemBase:
                 if mic_id not in self.sample_on_microscope_flags: # Initialize flag for new microscopes
                     self.sample_on_microscope_flags[mic_id] = False
             else:
-                logger.warning(f"Found a microscope configuration without an ID in {CONFIG_FILE_PATH}. Skipping: {mic_config}")
+                logger.warning(f"Found a microscope configuration without an ID in {config_file_path}. Skipping: {mic_config}")
         
         # Handle microscopes removed from config
         removed_microscope_ids = [mid for mid in self.configured_microscopes_info if mid not in newly_configured_microscopes_info]
@@ -491,18 +501,20 @@ class OrchestrationSystemBase:
 
     async def _write_tasks_to_config(self):
         """Writes the current state of all tasks back to the configuration file."""
-        
+
         output_config_data = {"samples": []}
-        
+        config_file_path = self._get_config_file_path()
+        config_file_path_tmp = self._get_config_file_path_tmp()
+
         async with self._config_lock: 
             try:
-                with open(CONFIG_FILE_PATH, 'r') as f_read:
+                with open(config_file_path, 'r') as f_read:
                     existing_data = json.load(f_read)
                     for key, value in existing_data.items():
                         if key != "samples":
                             output_config_data[key] = value
             except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-                 logger.warning(f"Could not re-read {CONFIG_FILE_PATH} before writing: {e}. Will create/overwrite with current task data only.")
+                 logger.warning(f"Could not re-read {config_file_path} before writing: {e}. Will create/overwrite with current task data only.")
 
             for task_name, task_data_internal in self.tasks.items():
                 settings_to_write = copy.deepcopy(task_data_internal.get("_raw_settings_from_input", {}))
@@ -548,11 +560,11 @@ class OrchestrationSystemBase:
                 output_config_data["samples"].append(sample_entry)
             
             try:
-                with open(CONFIG_FILE_PATH_TMP, 'w') as f_write:
+                with open(config_file_path_tmp, 'w') as f_write:
                     json.dump(output_config_data, f_write, indent=4)
-                os.replace(CONFIG_FILE_PATH_TMP, CONFIG_FILE_PATH)
+                os.replace(config_file_path_tmp, config_file_path)
             except (IOError, OSError) as e:
-                logger.error(f"Error writing tasks state to {CONFIG_FILE_PATH}: {e}")
+                logger.error(f"Error writing tasks state to {config_file_path}: {e}")
                 
     async def _update_task_state_and_write_config(self, task_name, status=None, current_tp_to_move_to_imaged: datetime = None):
         """Helper to update task state (including time points) and write to config."""
@@ -594,4 +606,3 @@ class OrchestrationSystemBase:
 
         if changed:
             await self._write_tasks_to_config()
-
