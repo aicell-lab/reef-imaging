@@ -167,7 +167,7 @@ Hamilton-specific orchestrator contract:
 
 - `transport_plate(from_device, to_device, slot=...)` remains the only physical movement API, including routes touching `hamilton`
 - `get_hamilton_status()` reports Hamilton executor connectivity, executor status, and active Hamilton-related operations
-- `run_hamilton_protocol(script_content, timeout=3600)` starts Hamilton script content only and returns immediately with an `action_id`
+- `run_hamilton_protocol(script_content, timeout=3600)` starts simple Hamilton script content only and returns immediately with an `action_id`
 
 Recommended composed workflow:
 
@@ -198,7 +198,7 @@ The CLI will:
 - Offer emergency actions to cancel a scan or halt the robot
 - Save a timestamped report under `hardware_test_reports/`
 
-Hamilton smoke-test modes validate transport only. They do not execute Hamilton liquid-handling scripts; use `run_hamilton_protocol(...)` separately once the plate is already on Hamilton.
+Hamilton smoke-test modes validate transport only. They do not execute Hamilton liquid-handling scripts; use `run_hamilton_protocol(...)` separately once the plate is already on Hamilton. The intended `script_content` should stay very simple: constants plus direct staged helper calls, with imports and helper wiring handled server-side.
 
 ### Starting Individual Hardware Services
 

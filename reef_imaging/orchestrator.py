@@ -1091,7 +1091,7 @@ class OrchestrationSystem:
         script_content: str,
         timeout: int = 3600,
     ):
-        """Start a Hamilton script on the existing executor service without transport."""
+        """Mirror a simple Hamilton protocol payload to the local executor."""
 
         if not isinstance(script_content, str) or not script_content.strip():
             return {"success": False, "message": "script_content must be a non-empty string."}
@@ -1112,18 +1112,16 @@ class OrchestrationSystem:
             )
 
             async with self.admission_controller.hold(request):
-                start_result = await service.start_execution(
-                    script_content=script_content,
+                start_result = await service.start_protocol(
+                    protocol_script=script_content,
                     timeout=timeout,
                 )
                 if not start_result.get("accepted"):
-                    live_status = await self._get_hamilton_executor_status(refresh_if_missing=False)
-                    message = start_result.get("error") or "Hamilton executor rejected the run request."
                     response = {
                         "success": False,
-                        "message": message,
+                        "message": start_result.get("error") or "Hamilton executor rejected the run request.",
                         "start_result": start_result,
-                        "hamilton_status": live_status,
+                        "hamilton_status": await self._get_hamilton_executor_status(refresh_if_missing=False),
                     }
                     if start_result.get("busy"):
                         response["state"] = "busy"

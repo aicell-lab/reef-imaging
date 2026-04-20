@@ -198,7 +198,7 @@ The orchestrator exposes the following Hypha service methods:
 | `get_lab_video_stream_urls()` | Get camera stream URLs |
 | `transport_plate(from_device, to_device, slot)` | **Unified transport API** |
 | `get_hamilton_status()` | Get Hamilton executor connectivity, executor status, and active Hamilton-related operations |
-| `run_hamilton_protocol(script_content, timeout=3600)` | Start Hamilton script content without any built-in transport and return immediately |
+| `run_hamilton_protocol(script_content, timeout=3600)` | Start simple Hamilton script content without any built-in transport and return immediately |
 
 **Unified Transport API:**
 The `transport_plate()` method provides a single interface for all plate transport operations.
@@ -236,7 +236,7 @@ Keep Hamilton execution separate from plate movement.
 # 1. Move the plate onto Hamilton
 await orchestrator.transport_plate("incubator", "hamilton", slot=5)
 
-# 2. Execute a Hamilton script on the existing executor
+# 2. Execute simple Hamilton script content on the existing executor
 result = await orchestrator.run_hamilton_protocol(script_content=script_text, timeout=3600)
 
 # 3. Poll Hamilton status until the executor is idle again
@@ -246,7 +246,7 @@ status = await orchestrator.get_hamilton_status()
 await orchestrator.transport_plate("hamilton", "microscope-squid-1", slot=5)
 ```
 
-`run_hamilton_protocol(...)` assumes the plate is already on Hamilton. It does not load from incubator, move the robotic arm, return the plate afterward, or wait for protocol completion. Use `get_hamilton_status()` to poll executor state.
+`run_hamilton_protocol(...)` assumes the plate is already on Hamilton. It does not load from incubator, move the robotic arm, return the plate afterward, or wait for protocol completion. The intended `script_content` should stay very simple: constants plus direct staged helper calls, with imports and helper wiring handled server-side. Use `get_hamilton_status()` to poll executor state.
 
 ### Microscope Busy-State Management
 
