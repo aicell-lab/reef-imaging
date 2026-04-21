@@ -17,7 +17,6 @@ The satellite fixes are safe to merge. The orchestrator refactoring is mechanica
 
 - **New:** 600s timeout on all robotic arm `transport_plate()` calls
 - **New:** 60s timeout on `scan_start()` calls
-- **New:** Cloud connection health monitoring
 - **Fixed:** Incubator health check was disabled (commented out)
 - **Fixed:** Missing `ping_interval` on 4 services causing silent WebSocket disconnects
 
@@ -161,15 +160,6 @@ scan_result = await asyncio.wait_for(
 | Full reconnect failure | `except Exception` | `except (ConnectionError, OSError, asyncio.TimeoutError)` | **Safer** — won't swallow unexpected errors |
 | Microscope disconnect | `except Exception` | `except (ConnectionError, OSError, AttributeError)` | **Safer** |
 
-### 3.4 Cloud Connection Health Check (NEW)
-
-New background task `check_cloud_connection_health()` monitors the cloud Hypha connection (to `hypha.aicell.io`) and auto-reconnects + re-registers the orchestrator service if lost.
-
-**Triggered from:** `tasks.py:540` inside `_register_self_as_hypha_service()`
-
-**Main branch behavior:** Cloud connection drop was only detected when an external client called an orchestrator API, which would then fail.
-**Refactor behavior:** Proactive monitoring every 30s; auto-reconnect after 5 consecutive failures.
-**Risk assessment:** **Low** — additive feature, doesn't change existing behavior on success path.
 
 ### 3.5 Critical Service State Cleanup
 

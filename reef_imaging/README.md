@@ -28,7 +28,6 @@ The main orchestration engine, split into 6 modules for maintainability:
 - Health monitoring with automatic reconnection (30-second intervals)
 - Critical operation protection to prevent mid-operation shutdowns
 - Atomic config writes (`config.json.tmp` → `config.json`) to prevent corruption
-- Cloud connection health monitoring with auto-reconnect
 - Comprehensive error handling and logging
 
 **Exposed Hypha Tool APIs** (decorated with `@schema_function`):

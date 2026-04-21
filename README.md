@@ -25,7 +25,6 @@ The REEF Imaging system is built on a modular architecture with four main layers
    - Hardware coordination (microscope, robotic arm, incubator, Hamilton executor)
    - Admission-controlled busy rejection for transport and scan conflicts
    - Health monitoring with automatic reconnection
-   - Cloud connection health monitoring with auto-reconnect
    - Critical operation protection and error recovery
 
 2. **Hardware Control Layer** (`control/`)

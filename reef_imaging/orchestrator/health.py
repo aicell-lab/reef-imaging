@@ -1,7 +1,6 @@
 """Health check and connection management mixin."""
 import asyncio
 import sys
-from hypha_rpc import connect_to_server
 from .core import logger
 
 
@@ -303,61 +302,6 @@ class HealthMixin:
         logger.info(f'Connection setup completed. {connected_microscope_count}/{len(self.configured_microscopes_info)} microscopes ready.')
         
         return bool(self.incubator and self.robotic_arm)
-
-    async def check_cloud_connection_health(self):
-        """Monitor the cloud Hypha connection and reconnect if dropped."""
-        if not self.orchestrator_hypha_server_connection:
-            logger.info("No cloud connection to monitor.")
-            return
-
-        logger.info("Starting cloud connection health check...")
-        consecutive_failures = 0
-        max_failures = 5
-
-        while True:
-            try:
-                # Quick ping via the connection's internal websocket or a lightweight op
-                # Hypha connections don't have a direct ping, but we can check the server info
-                await asyncio.wait_for(
-                    self.orchestrator_hypha_server_connection.get_server_info(), timeout=10
-                )
-                if consecutive_failures > 0:
-                    logger.info(f"Cloud connection recovered after {consecutive_failures} failures.")
-                consecutive_failures = 0
-            except Exception as e:
-                if isinstance(e, (SystemExit, KeyboardInterrupt, asyncio.CancelledError, GeneratorExit)):
-                    raise
-                consecutive_failures += 1
-                logger.warning(
-                    f"Cloud connection health check failed ({consecutive_failures}/{max_failures}): {e}"
-                )
-                if consecutive_failures >= max_failures:
-                    logger.error("Cloud connection lost. Attempting to reconnect...")
-                    try:
-                        if self.orchestrator_hypha_server_connection:
-                            try:
-                                await self.orchestrator_hypha_server_connection.disconnect()
-                            except Exception:
-                                pass
-                        server_config = {
-                            "server_url": self.orchestrator_hypha_server_url,
-                            "ping_interval": 30,
-                            "workspace": self.workspace,
-                            "token": self.token_for_orchestrator_registration,
-                        }
-                        self.orchestrator_hypha_server_connection = await connect_to_server(server_config)
-                        await self.orchestrator_hypha_server_connection.register_service(
-                            self._build_service_api(),
-                            overwrite=True,
-                        )
-                        logger.info("Cloud connection re-established and service re-registered.")
-                        consecutive_failures = 0
-                    except Exception as reconnect_err:
-                        logger.error(f"Cloud reconnection failed: {reconnect_err}. Will retry in 60s.")
-                        await asyncio.sleep(60)
-                        continue
-
-            await asyncio.sleep(30)
 
     async def disconnect_services(self):
         """Stop all health checks, clear service references, and disconnect from the stable server connection."""

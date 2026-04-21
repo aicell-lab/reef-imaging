@@ -538,8 +538,6 @@ class TaskMixin:
                 "Orchestrator management service registered successfully on cloud Hypha. "
                 f"Service ID: {registered_service.id}"
             )
-            # Start cloud connection health monitor
-            asyncio.create_task(self.check_cloud_connection_health())
             registration_succeeded = True
         else:
             logger.warning(
