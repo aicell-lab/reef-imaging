@@ -127,9 +127,14 @@ class FakeIncubator:
 class FakeRoboticArm:
     def __init__(self):
         self.calls = []
+        self.actions = []
 
     async def transport_plate(self, **kwargs):
         self.calls.append(kwargs)
+
+    async def execute_action(self, action_id):
+        self.actions.append(action_id)
+        return True
 
 
 class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
@@ -344,6 +349,7 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         orchestrator.hamilton_executor = executor
+        orchestrator.robotic_arm = FakeRoboticArm()
 
         with patch.object(
             orchestrator,
@@ -356,6 +362,7 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(response["success"])
+        self.assertEqual(orchestrator.robotic_arm.actions, ["move_plate_rail_to_hamilton"])
         self.assertEqual(executor.start_calls[0]["protocol_script"], "print('run protocol')")
         self.assertEqual(executor.start_calls[0]["timeout"], 3600)
         self.assertEqual(response["action_id"], "action-123")

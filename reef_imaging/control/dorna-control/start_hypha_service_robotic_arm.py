@@ -224,6 +224,11 @@ class RoboticArmService:
     def _get_action_definitions(self):
         """Define predefined grab/put actions for manual operations."""
         return {
+            "move_plate_rail_to_hamilton": {
+                "name": "Move Plate Rail to Hamilton",
+                "description": "Move the Hamilton slide rail to the Hamilton-side position",
+                "scripts": ["paths/move_plate_rail_to_hamilton.txt"],
+            },
             "grab_from_incubator": {
                 "name": "Grab from Incubator",
                 "description": "Grab a sample from the incubator",

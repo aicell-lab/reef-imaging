@@ -67,6 +67,14 @@ class APIMixin:
             )
 
             async with self.admission_controller.hold(request):
+                if self.robotic_arm is None:
+                    await self.setup_connections()
+                if self.robotic_arm is None:
+                    raise RuntimeError(
+                        f"Robotic arm service '{self.robotic_arm_id}' is not available."
+                    )
+                # Ensure slide rail is in the Hamilton-side position before protocol execution.
+                await self.robotic_arm.execute_action("move_plate_rail_to_hamilton")
                 start_result = await service.start_protocol(
                     protocol_script=script_content,
                     timeout=timeout,
