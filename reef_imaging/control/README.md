@@ -4,12 +4,13 @@ This directory contains the hardware control modules for the REEF imaging system
 
 ## System Architecture
 
-The control system consists of four main components:
+The control system consists of five main components:
 
 1. **Microscope Control** - Manages the SQUID microscope for imaging
 2. **Robotic Arm Control** - Controls the Dorna robotic arm for sample handling
 3. **Incubator Control** - Manages the Cytomat incubator for sample storage
-4. **Mirror Services** - Proxies requests between cloud and local systems
+4. **Hamilton Control** - Runs liquid-handling protocols on the Hamilton robot
+5. **Mirror Services** - Proxies requests between cloud and local systems
 
 Each component exposes a standardized API through Hypha services, allowing orchestration by the main reef-imaging system.
 
@@ -74,7 +75,22 @@ The Cytomat incubator control service manages sample storage and environmental c
   - `start_hypha_service_incubator.py` - Hypha service interface
   - `samples.json` - Sample metadata and status tracking
 
+### Hamilton Control (`mirror-services/`)
+
+The Hamilton liquid handler is controlled via a local executor service running on a Windows workstation. The `mirror_hamilton.py` service proxies cloud requests to this local executor.
+
+- **Core Features:**
+  - Execute Hamilton Python protocols (pyhamilton scripts)
+  - Status polling and result retrieval
+  - Cloud-to-local proxy for remote protocol submission
+
+- **Hypha service ID**: `hamilton-script-executor` (mirrored to cloud)
+
+- **Main Files:**
+  - `mirror_hamilton.py` - Cloud-to-local proxy for Hamilton executor
+
 ### Mirror Services (`mirror-services/`)
+
 
 These services act as proxies between the cloud Hypha server and local hardware control services, enabling remote operation.
 
@@ -87,6 +103,7 @@ These services act as proxies between the cloud Hypha server and local hardware 
 - **Main Files:**
   - `mirror_robotic_arm.py` - Robotic arm mirror service
   - `mirror_incubator.py` - Incubator mirror service
+  - `mirror_hamilton.py` - Hamilton executor mirror service
 
 **Note**: The microscope mirror service (`mirror_squid_control.py`) has been removed. The `squid_control` package now includes built-in mirror functionality, eliminating the need for a separate mirror service.
 

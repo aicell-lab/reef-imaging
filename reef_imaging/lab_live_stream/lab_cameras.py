@@ -275,6 +275,7 @@ async def main():
         "server_url": HYPHA_SERVER_URL,
         "workspace": HYPHA_WORKSPACE,
         "token": token,
+        "ping_interval": 30,
     })
 
     for cam in cameras:

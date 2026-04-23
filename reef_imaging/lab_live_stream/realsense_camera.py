@@ -283,7 +283,7 @@ async def serve_fastapi(args, context=None):
 
 async def main():
     # Connect to Hypha server
-    server = await connect_to_server({"server_url": "https://hypha.aicell.io","workspace": "reef-imaging", "token": token})
+    server = await connect_to_server({"server_url": "https://hypha.aicell.io","workspace": "reef-imaging", "token": token, "ping_interval": 30})
 
     svc_info = await server.register_service({
         "id": "reef-realsense-feed",

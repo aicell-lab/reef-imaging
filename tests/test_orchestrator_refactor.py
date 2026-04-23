@@ -1,11 +1,55 @@
+import importlib
+from datetime import datetime
 import json
 import logging
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import reef_imaging.orchestrator as orchestrator_module
+
+def _install_hypha_rpc_stub() -> None:
+    if "hypha_rpc" in sys.modules:
+        return
+
+    hypha_rpc_module = types.ModuleType("hypha_rpc")
+
+    async def _connect_to_server(*args, **kwargs):
+        raise RuntimeError("connect_to_server should be mocked in unit tests")
+
+    hypha_rpc_module.connect_to_server = _connect_to_server
+
+    hypha_rpc_utils_module = types.ModuleType("hypha_rpc.utils")
+    hypha_rpc_schema_module = types.ModuleType("hypha_rpc.utils.schema")
+
+    def schema_function(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
+    hypha_rpc_schema_module.schema_function = schema_function
+
+    sys.modules["hypha_rpc"] = hypha_rpc_module
+    sys.modules["hypha_rpc.utils"] = hypha_rpc_utils_module
+    sys.modules["hypha_rpc.utils.schema"] = hypha_rpc_schema_module
+
+
+def _install_dotenv_stub() -> None:
+    if "dotenv" in sys.modules:
+        return
+
+    dotenv_module = types.ModuleType("dotenv")
+    dotenv_module.load_dotenv = lambda *args, **kwargs: None
+    dotenv_module.find_dotenv = lambda *args, **kwargs: ""
+    sys.modules["dotenv"] = dotenv_module
+
+
+_install_hypha_rpc_stub()
+_install_dotenv_stub()
+orchestrator_module = importlib.import_module("reef_imaging.orchestrator")
 
 
 def _build_sample(name: str, slot: int, microscope_id: str, well: str, note: str) -> dict:
@@ -55,8 +99,8 @@ class FakeHamiltonExecutor:
     async def get_status(self):
         return dict(self.status)
 
-    async def start_execution(self, script_content, timeout):
-        self.start_calls.append({"script_content": script_content, "timeout": timeout})
+    async def start_protocol(self, protocol_script, timeout):
+        self.start_calls.append({"protocol_script": protocol_script, "timeout": timeout})
         return dict(self.start_result)
 
 class FakeIncubator:
@@ -123,6 +167,70 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(rewritten_samples["task-alpha"]["custom_note"], "alpha")
             self.assertEqual(rewritten_samples["task-beta"]["custom_note"], "beta")
+
+    async def test_task_api_uses_patched_config_paths(self):
+        config_data = {
+            "samples": [],
+            "microscopes": [{"id": "microscope-squid-1"}],
+        }
+        new_task = _build_sample("task-gamma", 7, "microscope-squid-1", "C3", "gamma")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            tmp_path = Path(temp_dir) / "config.json.tmp"
+            config_path.write_text(json.dumps(config_data, indent=4), encoding="utf-8")
+
+            orchestrator = orchestrator_module.OrchestrationSystem()
+
+            with patch.object(orchestrator_module, "CONFIG_FILE_PATH", str(config_path)), patch.object(
+                orchestrator_module,
+                "CONFIG_FILE_PATH_TMP",
+                str(tmp_path),
+            ):
+                add_result = await orchestrator.add_imaging_task(new_task)
+                all_tasks = await orchestrator.get_all_imaging_tasks()
+                delete_result = await orchestrator.delete_imaging_task("task-gamma")
+
+            rewritten_data = json.loads(config_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(add_result["success"])
+            self.assertEqual([task["name"] for task in all_tasks], ["task-gamma"])
+            self.assertTrue(delete_result["success"])
+            self.assertEqual(rewritten_data["samples"], [])
+
+    async def test_start_due_task_copies_task_config_without_name_error(self):
+        orchestrator = orchestrator_module.OrchestrationSystem()
+        due_time = datetime.now()
+        orchestrator.tasks = {
+            "task-alpha": {
+                "config": {
+                    "name": "task-alpha",
+                    "scan_mode": "microscope_only",
+                    "saved_data_type": "raw_images_well_plate",
+                    "allocated_microscope": "microscope-squid-1",
+                    "pending_datetimes": [due_time],
+                    "illumination_settings": [{"channel": "BF"}],
+                    "do_contrast_autofocus": True,
+                    "do_reflection_af": False,
+                    "wells_to_scan": ["A1"],
+                    "Nx": 1,
+                    "Ny": 1,
+                    "dx": 0.8,
+                    "dy": 0.8,
+                },
+                "status": "pending",
+            }
+        }
+        orchestrator.configured_microscopes_info = {"microscope-squid-1": {"id": "microscope-squid-1"}}
+        orchestrator.microscope_services = {"microscope-squid-1": object()}
+        orchestrator._update_task_state_and_write_config = AsyncMock()
+        orchestrator._run_scheduled_cycle = AsyncMock()
+
+        started = await orchestrator._start_due_task("task-alpha", due_time)
+
+        self.assertTrue(started)
+        await orchestrator._scheduled_cycle_tasks["task-alpha"]
+        orchestrator._run_scheduled_cycle.assert_awaited_once()
 
     async def test_load_api_rejects_busy_transport_resources(self):
         orchestrator = orchestrator_module.OrchestrationSystem()
@@ -244,7 +352,7 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(response["success"])
-        self.assertEqual(executor.start_calls[0]["script_content"], "print('run protocol')")
+        self.assertEqual(executor.start_calls[0]["protocol_script"], "print('run protocol')")
         self.assertEqual(executor.start_calls[0]["timeout"], 3600)
         self.assertEqual(response["action_id"], "action-123")
         self.assertEqual(response["state"], "running")
