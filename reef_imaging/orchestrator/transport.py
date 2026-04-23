@@ -5,14 +5,6 @@ from reef_imaging.orchestration import ResourceBusyError
 
 
 class TransportMixin:
-    def _normalize_hamilton_rail_position(self, position: str) -> str:
-        key = str(position).strip().lower().replace("_", "-").replace(" ", "-")
-        if key == "hamilton":
-            return "hamilton"
-        if key in {"robotic-arm", "arm"}:
-            return "robotic-arm"
-        raise ValueError("position must be 'hamilton' or 'robotic-arm'")
-
     async def _run_manual_transport_operation(self, action: str, incubator_slot: int, microscope_id: str):
         """Execute a transport request directly if all required resources are idle."""
         if not self.incubator or not self.robotic_arm or microscope_id not in self.microscope_services:
@@ -139,49 +131,6 @@ class TransportMixin:
                 f"{f' ({current_action})' if current_action else ''}."
             )
         return status
-
-    async def _execute_move_hamilton_plate_rail(
-        self,
-        position: str,
-        *,
-        manage_transport_resources: bool = True,
-    ):
-        """Move the Hamilton slide rail to the requested side via the robotic-arm service."""
-        normalized_position = self._normalize_hamilton_rail_position(position)
-
-        if manage_transport_resources:
-            request = self._build_request(
-                "move-hamilton-rail",
-                extra_resources=self._hamilton_rail_resources(),
-                metadata={"position": normalized_position},
-            )
-            async with self.admission_controller.hold(request, wait=True):
-                return await self._execute_move_hamilton_plate_rail(
-                    normalized_position,
-                    manage_transport_resources=False,
-                )
-
-        if not self.robotic_arm or not self.hamilton_executor:
-            setup_ok = await self.setup_connections()
-            if not setup_ok:
-                raise RuntimeError("Hamilton rail services are not ready.")
-        if not self.robotic_arm:
-            raise RuntimeError("Robotic arm service is not available.")
-        if not self.hamilton_executor:
-            raise RuntimeError(
-                f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
-            )
-
-        await self._assert_hamilton_idle_for_transport()
-        result = await asyncio.wait_for(
-            self.robotic_arm.move_plate_rail(position=normalized_position),
-            timeout=120,
-        )
-        logger.info(f"Hamilton plate rail moved to '{normalized_position}'")
-        return {
-            "position": normalized_position,
-            "robotic_arm_result": result,
-        }
 
     def _raise_transport_precondition(self, *, route: str, incubator_slot: int, detail: str):
         """Raise a user-facing precondition error for a transport request."""

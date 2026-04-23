@@ -5,7 +5,7 @@ import json
 import os
 
 from hypha_rpc.utils.schema import schema_function
-from .core import HamiltonBusyError, logger
+from .core import logger
 from reef_imaging.orchestration import ResourceBusyError
 
 
@@ -62,15 +62,11 @@ class APIMixin:
 
             request = self._build_request(
                 "hamilton-execution",
-                extra_resources=self._hamilton_rail_resources(),
+                extra_resources=(self._hamilton_resource(),),
                 metadata={"timeout_seconds": timeout},
             )
 
             async with self.admission_controller.hold(request):
-                rail_result = await self._execute_move_hamilton_plate_rail(
-                    "hamilton",
-                    manage_transport_resources=False,
-                )
                 start_result = await service.start_protocol(
                     protocol_script=script_content,
                     timeout=timeout,
@@ -80,7 +76,6 @@ class APIMixin:
                         "success": False,
                         "message": start_result.get("error") or "Hamilton executor rejected the run request.",
                         "start_result": start_result,
-                        "rail_result": rail_result,
                         "hamilton_status": await self._get_hamilton_executor_status(refresh_if_missing=False),
                     }
                     if start_result.get("busy"):
@@ -91,7 +86,6 @@ class APIMixin:
                 "success": True,
                 "message": "Hamilton protocol accepted and started.",
                 "start_result": start_result,
-                "rail_result": rail_result,
                 "action_id": start_result.get("action_id"),
                 "state": start_result.get("status", "running"),
                 "hamilton_status": await self.get_hamilton_status(),
@@ -102,36 +96,8 @@ class APIMixin:
                 "Hamilton protocol request rejected - Hamilton-related resources are busy.",
                 busy_error,
             )
-        except HamiltonBusyError as busy_error:
-            return self._hamilton_busy_response(str(busy_error))
         except (ConnectionError, OSError, RuntimeError, asyncio.TimeoutError) as e:
             logger.error(f"Hamilton protocol execution failed: {e}", exc_info=True)
-            return {
-                "success": False,
-                "message": str(e),
-                "hamilton_status": await self.get_hamilton_status(),
-                "runtime_status": await self.get_runtime_status(),
-            }
-
-    @schema_function(skip_self=True)
-    async def move_hamilton_plate_rail(self, position: str = "hamilton"):
-        """Move the Hamilton slide rail to the Hamilton side or the robotic-arm side."""
-        try:
-            result = await self._execute_move_hamilton_plate_rail(position)
-            return {
-                "success": True,
-                "message": f"Hamilton plate rail moved to {result['position']}.",
-                **result,
-            }
-        except ResourceBusyError as busy_error:
-            return self._busy_response(
-                "Hamilton plate rail move rejected - required resources are busy.",
-                busy_error,
-            )
-        except HamiltonBusyError as busy_error:
-            return self._hamilton_busy_response(str(busy_error))
-        except (ConnectionError, OSError, RuntimeError, asyncio.TimeoutError, ValueError) as e:
-            logger.error(f"Failed to move Hamilton plate rail: {e}", exc_info=True)
             return {
                 "success": False,
                 "message": str(e),

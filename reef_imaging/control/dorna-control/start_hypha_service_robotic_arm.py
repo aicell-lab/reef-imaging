@@ -148,7 +148,6 @@ class RoboticArmService:
             "set_alarm": self.set_alarm,
             "light_on": self.light_on,
             "light_off": self.light_off,
-            "move_plate_rail": self.move_plate_rail,
             # Action management
             "get_actions": self.get_actions,
             "execute_action": self.execute_action,
@@ -225,16 +224,6 @@ class RoboticArmService:
     def _get_action_definitions(self):
         """Define predefined grab/put actions for manual operations."""
         return {
-            "move_plate_rail_to_hamilton": {
-                "name": "Move Plate Rail to Hamilton",
-                "description": "Move the Hamilton slide rail to the Hamilton-side handoff position",
-                "scripts": ["paths/move_plate_rail_to_hamilton.txt"],
-            },
-            "move_plate_rail_to_robotic_arm": {
-                "name": "Move Plate Rail to Robotic Arm",
-                "description": "Move the Hamilton slide rail to the robotic-arm-side pickup position",
-                "scripts": ["paths/move_plate_rail_to_robotic_arm.txt"],
-            },
             "grab_from_incubator": {
                 "name": "Grab from Incubator",
                 "description": "Grab a sample from the incubator",
@@ -286,16 +275,6 @@ class RoboticArmService:
                 "scripts": ["paths/put_on_squid-plus-3.txt"],
             },
         }
-
-    def _normalize_plate_rail_position(self, position: str) -> tuple[str, str]:
-        key = str(position).strip().lower().replace("_", "-").replace(" ", "-")
-        if key == "hamilton":
-            return "hamilton", "move_plate_rail_to_hamilton"
-        if key in {"robotic-arm", "arm"}:
-            return "robotic-arm", "move_plate_rail_to_robotic_arm"
-        raise Exception(
-            "Invalid plate rail position. Supported positions: 'hamilton', 'robotic-arm'."
-        )
 
     @schema_function(skip_self=True)
     def connect(self):
@@ -456,24 +435,6 @@ class RoboticArmService:
             logger.error(f"Failed to transport sample from '{from_device}' to '{to_device}': {e}")
             raise e
 
-    @schema_function(skip_self=True)
-    def move_plate_rail(
-        self,
-        position: str = Field(
-            "hamilton",
-            description="Hamilton plate rail side: 'hamilton' or 'robotic-arm'",
-        ),
-    ):
-        """Move the Hamilton slide rail to the requested side."""
-        normalized_position, action_id = self._normalize_plate_rail_position(position)
-        result = self.execute_action(action_id)
-        logger.info(f"Hamilton plate rail moved to '{normalized_position}'")
-        return {
-            "success": True,
-            "position": normalized_position,
-            "action_id": action_id,
-            "result": result,
-        }
 
 
     @schema_function(skip_self=True)

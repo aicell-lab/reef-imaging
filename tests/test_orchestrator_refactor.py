@@ -101,12 +101,6 @@ class FakeHamiltonExecutor:
 
     async def start_protocol(self, protocol_script, timeout):
         self.start_calls.append({"protocol_script": protocol_script, "timeout": timeout})
-        if self.start_result.get("accepted") and self.start_result.get("status") == "running":
-            self.status = dict(self.status)
-            self.status["busy"] = True
-            action_id = self.start_result.get("action_id")
-            if action_id is not None:
-                self.status["current_action_id"] = action_id
         return dict(self.start_result)
 
 class FakeIncubator:
@@ -133,14 +127,9 @@ class FakeIncubator:
 class FakeRoboticArm:
     def __init__(self):
         self.calls = []
-        self.rail_moves = []
 
     async def transport_plate(self, **kwargs):
         self.calls.append(kwargs)
-
-    async def move_plate_rail(self, position):
-        self.rail_moves.append(position)
-        return {"success": True, "position": position}
 
 
 class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
@@ -348,14 +337,13 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
                 "status": "running",
             },
             status={
-                "busy": False,
-                "current_action_id": None,
+                "busy": True,
+                "current_action_id": "action-123",
                 "last_action_id": None,
                 "success": False,
             },
         )
         orchestrator.hamilton_executor = executor
-        orchestrator.robotic_arm = FakeRoboticArm()
 
         with patch.object(
             orchestrator,
@@ -368,23 +356,11 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(response["success"])
-        self.assertEqual(orchestrator.robotic_arm.rail_moves, ["hamilton"])
         self.assertEqual(executor.start_calls[0]["protocol_script"], "print('run protocol')")
         self.assertEqual(executor.start_calls[0]["timeout"], 3600)
         self.assertEqual(response["action_id"], "action-123")
         self.assertEqual(response["state"], "running")
         self.assertTrue(response["hamilton_status"]["executor_status"]["busy"])
-
-    async def test_move_hamilton_plate_rail_forwards_position_to_robotic_arm(self):
-        orchestrator = orchestrator_module.OrchestrationSystem()
-        orchestrator.robotic_arm = FakeRoboticArm()
-        orchestrator.hamilton_executor = FakeHamiltonExecutor()
-
-        response = await orchestrator.move_hamilton_plate_rail("robotic-arm")
-
-        self.assertTrue(response["success"])
-        self.assertEqual(response["position"], "robotic-arm")
-        self.assertEqual(orchestrator.robotic_arm.rail_moves, ["robotic-arm"])
 
     async def test_hamilton_execution_lock_does_not_block_unrelated_microscope_resource(self):
         orchestrator = orchestrator_module.OrchestrationSystem()
