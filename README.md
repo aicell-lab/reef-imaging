@@ -167,14 +167,16 @@ Hamilton-specific orchestrator contract:
 
 - `transport_plate(from_device, to_device, slot=...)` remains the only physical movement API, including routes touching `hamilton`
 - `get_hamilton_status()` reports Hamilton executor connectivity, executor status, and active Hamilton-related operations
+- `move_hamilton_plate_rail(position="hamilton")` moves the Hamilton slide rail to either the `hamilton` side (`j7=457`) or the `robotic-arm` side (`j7≈30`)
 - `run_hamilton_protocol(script_content, timeout=3600)` starts simple Hamilton script content only and returns immediately with an `action_id`
 
 Recommended composed workflow:
 
 1. `transport_plate(..., "hamilton", ...)`
-2. `run_hamilton_protocol(script_content=...)`
-3. Poll `get_hamilton_status()` until the Hamilton executor is idle again
-4. `transport_plate("hamilton", ..., ...)`
+2. `move_hamilton_plate_rail(position="hamilton")`
+3. `run_hamilton_protocol(script_content=...)`
+4. Poll `get_hamilton_status()` until the Hamilton executor is idle again
+5. `transport_plate("hamilton", ..., ...)`
 
 ### Critical Hardware Smoke Test
 
@@ -198,7 +200,7 @@ The CLI will:
 - Offer emergency actions to cancel a scan or halt the robot
 - Save a timestamped report under `hardware_test_reports/`
 
-Hamilton smoke-test modes validate transport only. They do not execute Hamilton liquid-handling scripts; use `run_hamilton_protocol(...)` separately once the plate is already on Hamilton. The intended `script_content` should stay very simple: constants plus direct staged helper calls, with imports and helper wiring handled server-side.
+Hamilton smoke-test modes validate transport only. They do not execute Hamilton liquid-handling scripts; use `run_hamilton_protocol(...)` separately once the plate is already on Hamilton. The intended `script_content` should stay very simple: constants plus direct staged helper calls, with imports and helper wiring handled server-side. The orchestrator now reasserts the Hamilton-side rail position automatically before each protocol start.
 
 ### Starting Individual Hardware Services
 

@@ -150,6 +150,9 @@ class OrchestrationSystemBase:
     def _hamilton_transport_resources(self) -> tuple[str, ...]:
         return self._transport_resources() + (self._hamilton_resource(),)
 
+    def _hamilton_rail_resources(self) -> tuple[str, ...]:
+        return ("robotic-arm", self._hamilton_resource())
+
     def _build_request(
         self,
         operation_type: str,
@@ -218,6 +221,7 @@ class OrchestrationSystemBase:
             # Status and monitoring
             "get_runtime_status": self.get_runtime_status,
             "get_hamilton_status": self.get_hamilton_status,
+            "move_hamilton_plate_rail": self.move_hamilton_plate_rail,
             "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
             # Emergency controls
             "cancel_microscope_scan": self.cancel_microscope_scan,

@@ -52,6 +52,18 @@ class DornaController:
         """Place a sample on a device."""
         self.set_motor(1)
         self.play_script(f"paths/put_on_{device}.txt")
+
+    def move_plate_rail(self, position="hamilton"):
+        """Move the Hamilton slide rail to the Hamilton-side or robotic-arm-side position."""
+        key = str(position).strip().lower().replace("_", "-").replace(" ", "-")
+        if key == "hamilton":
+            script_path = "paths/move_plate_rail_to_hamilton.txt"
+        elif key in {"robotic-arm", "arm"}:
+            script_path = "paths/move_plate_rail_to_robotic_arm.txt"
+        else:
+            raise ValueError("position must be 'hamilton' or 'robotic-arm'")
+        self.set_motor(1)
+        self.play_script(script_path)
     
     def halt(self):
         self.robot.halt()

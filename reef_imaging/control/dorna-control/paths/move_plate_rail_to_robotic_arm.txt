@@ -1,0 +1,1 @@
+{"cmd":"jmove","rel":0,"j7":30,"vel":50,"accel":100,"jerk":500}
