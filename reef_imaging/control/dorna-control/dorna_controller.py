@@ -1,5 +1,13 @@
 from dorna2 import Dorna
 import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+# j7 slide rail positions — VERIFY on hardware before first deployment
+ARM_RAIL_POSITION = 30.0       # j7 where robotic arm can reach the rail
+HAMILTON_RAIL_POSITION = 457.0  # j7 where Hamilton gripper can reach the rail
+
 
 class DornaController:
     def __init__(self, ip="192.168.2.20"):
@@ -29,6 +37,30 @@ class DornaController:
         status = self.robot.track_cmd()
         print(f"Robot status: {status}")
         return status["union"].get("stat", -1) != 2
+
+    # --- Slide rail (joint 7) control ---
+
+    def move_slide_rail_to(self, j7_position: float):
+        """Move only joint 7 (slide rail) to a target position."""
+        self.set_motor(1)
+        logger.info(f"Moving slide rail (j7) to {j7_position}")
+        self.robot.jmove(rel=0, j7=j7_position, vel=60)
+        logger.info(f"Slide rail reached j7={j7_position}")
+
+    def move_slide_rail_to_hamilton(self):
+        """Position slide rail at Hamilton side so Hamilton gripper can reach it."""
+        self.move_slide_rail_to(HAMILTON_RAIL_POSITION)
+
+    def move_slide_rail_to_arm(self):
+        """Position slide rail at arm side so robotic arm can reach it."""
+        self.move_slide_rail_to(ARM_RAIL_POSITION)
+
+    def get_slide_rail_position(self) -> float:
+        """Read current j7 position."""
+        joints = self.robot.get_all_joint()
+        return float(joints.get("j7", 0.0))
+
+    # --- Plate transport ---
 
     def transport_plate(self, from_device, to_device):
         """

@@ -116,6 +116,60 @@ class TransportMixin:
             return None
         return await service.get_status()
 
+    async def _recover_plate_to_rail(self) -> bool:
+        """Attempt to run the return_plate_to_rail recovery script on Hamilton.
+
+        This script moves the plate from operation_position back to plate_sample
+        (on the slide rail) and replaces lids. Returns True if recovery succeeded.
+        """
+        try:
+            executor = await self._get_hamilton_executor_proxy()
+            if executor is None:
+                logger.error("Cannot attempt recovery: Hamilton executor unavailable.")
+                return False
+
+            # Move slide rail to Hamilton-side first so Hamilton can reach it
+            await asyncio.wait_for(
+                self.robotic_arm.move_slide_rail_to_hamilton(),
+                timeout=120,
+            )
+
+            recovery_script = (
+                "from pyhamilton.protocols.helpers import ("
+                "create_reef_deck, safe_initialize, pick_lid, place_lid,"
+                "move_sample_plate_back_home"
+                ")\n"
+                "from pyhamilton import HamiltonInterface\n"
+                "from pyhamilton.resources import Plate96, Plate6, Plate12\n"
+                "deck = create_reef_deck("
+                "r'layouts\\reef-260422.lay',"
+                "reagent_1_plate_class=Plate6,"
+                "reagent_2_plate_class=Plate12"
+                ")\n"
+                "PLATE_CONFIG = {'plate_sample': {'plate_type': '96-well'}}\n"
+                "ham = HamiltonInterface()\n"
+                "try:\n"
+                "    ham.start()\n"
+                "    safe_initialize(ham)\n"
+                "    place_lid(ham, deck, 'plate_sample', plate_config=PLATE_CONFIG, eject=False)\n"
+                "    move_sample_plate_back_home(ham, deck, eject=True)\n"
+                "    print('stage:plate_returned_to_rail:end')\n"
+                "except Exception as e:\n"
+                "    print(f'recovery_error: {e}')\n"
+                "finally:\n"
+                "    ham.stop()\n"
+            )
+
+            result = await asyncio.wait_for(
+                executor.run_hamilton_protocol(recovery_script, timeout=120),
+                timeout=180,
+            )
+            logger.info(f"Recovery script result: {result}")
+            return True
+        except Exception as e:
+            logger.error(f"Plate-to-rail recovery failed: {e}", exc_info=True)
+            return False
+
     async def _assert_hamilton_idle_for_transport(self):
         """Reject Hamilton transport while the executor is busy with a protocol run."""
 
@@ -408,7 +462,15 @@ class TransportMixin:
         *,
         manage_transport_resources: bool = True,
     ):
-        """Execute the unload operation: move sample from Hamilton to incubator."""
+        """Execute the unload operation: move sample from Hamilton to incubator.
+
+        Safety sequence:
+        1. Verify sample is at Hamilton and Hamilton executor is idle
+        2. Verify the last Hamilton protocol succeeded (plate returned to rail)
+        3. If last run failed, attempt recovery via return_plate_to_rail script
+        4. Move slide rail to arm-side so robotic arm can grab
+        5. Arm grabs from slide rail, puts on incubator
+        """
         if manage_transport_resources:
             request = self._build_request(
                 "transport-unload-hamilton",
@@ -439,7 +501,27 @@ class TransportMixin:
         except Exception as e:
             logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
 
-        await self._assert_hamilton_idle_for_transport()
+        hamilton_status = await self._assert_hamilton_idle_for_transport()
+
+        # --- Safety guard: check if last Hamilton run succeeded ---
+        # If the protocol failed, the plate may still be at operation_position
+        # instead of on the slide rail. Attempt recovery before transport.
+        if hamilton_status:
+            last_result = hamilton_status.get("last_result")
+            if last_result and last_result.get("success") is False:
+                logger.warning(
+                    f"Last Hamilton protocol failed (status={last_result.get('status')}, "
+                    f"return_code={last_result.get('return_code')}). "
+                    f"Attempting recovery: running return_plate_to_rail script."
+                )
+                recovery_ok = await self._recover_plate_to_rail()
+                if not recovery_ok:
+                    raise RuntimeError(
+                        f"Cannot unload from Hamilton: last protocol failed AND recovery failed. "
+                        f"Manual intervention required for slot {incubator_slot}."
+                    )
+                logger.info("Recovery successful — plate should now be on slide rail.")
+
         logger.info(f"Unloading sample from Hamilton to incubator slot {incubator_slot}...")
 
         # Mark critical operation
@@ -452,11 +534,24 @@ class TransportMixin:
         self._mark_critical_services(critical_services)
 
         try:
-            # Move sample with robotic arm: Hamilton -> incubator (unified transport API)
+            # Step 1: Move slide rail to arm-side so the arm can reach the plate
+            logger.info("Moving slide rail to arm-side position...")
+            await asyncio.wait_for(
+                self.robotic_arm.move_slide_rail_to_arm(),
+                timeout=120,
+            )
+
+            # Step 2: Arm grabs from Hamilton slide rail
             await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
             await asyncio.wait_for(
-                self.robotic_arm.transport_plate(from_device="hamilton", to_device="incubator"),
-                timeout=600,
+                self.robotic_arm.grab_from("hamilton"),
+                timeout=300,
+            )
+
+            # Step 3: Arm puts on incubator
+            await asyncio.wait_for(
+                self.robotic_arm.put_on("incubator"),
+                timeout=300,
             )
 
             # Put sample back to incubator slot
@@ -662,6 +757,22 @@ class TransportMixin:
         await self._assert_hamilton_idle_for_transport()
         logger.info(f"Transporting sample from Hamilton to microscope {microscope_id_str} (slot {incubator_slot})...")
 
+        # --- Safety guard: check if last Hamilton run succeeded ---
+        hamilton_status = await self._get_hamilton_executor_status()
+        if hamilton_status:
+            last_result = hamilton_status.get("last_result")
+            if last_result and last_result.get("success") is False:
+                logger.warning(
+                    f"Last Hamilton protocol failed before Hamilton→microscope transport. "
+                    f"Attempting recovery: running return_plate_to_rail script."
+                )
+                recovery_ok = await self._recover_plate_to_rail()
+                if not recovery_ok:
+                    raise RuntimeError(
+                        f"Cannot transport from Hamilton to microscope: last protocol failed "
+                        f"AND recovery failed. Manual intervention required for slot {incubator_slot}."
+                    )
+
         # Mark critical operation
         self.in_critical_operation = True
         logger.info("CRITICAL OPERATION START: Robotic arm transporting sample from Hamilton to microscope")
@@ -678,11 +789,24 @@ class TransportMixin:
                 target_microscope_service.home_stage(),
             )
 
-            # Move sample with robotic arm: Hamilton -> microscope (unified transport API)
+            # Step 1: Move slide rail to arm-side so the arm can reach the plate
+            logger.info("Moving slide rail to arm-side position for Hamilton→microscope transport...")
+            await asyncio.wait_for(
+                self.robotic_arm.move_slide_rail_to_arm(),
+                timeout=120,
+            )
+
+            # Step 2: Arm grabs from Hamilton slide rail
             await self.incubator.update_sample_location(incubator_slot, "robotic_arm")
             await asyncio.wait_for(
-                self.robotic_arm.transport_plate(from_device="hamilton", to_device=microscope_id_str),
-                timeout=600,
+                self.robotic_arm.grab_from("hamilton"),
+                timeout=300,
+            )
+
+            # Step 3: Arm puts on microscope
+            await asyncio.wait_for(
+                self.robotic_arm.put_on(microscope_id_str),
+                timeout=300,
             )
 
             # Return stage and update location
