@@ -30,6 +30,10 @@ class HamiltonBusyError(RuntimeError):
     """Raised when a Hamilton-related action is rejected because the executor is busy."""
 
 
+class TransportPreconditionError(RuntimeError):
+    """Raised when a transport request does not match the sample's verified source state."""
+
+
 # Set up logging
 def setup_logging(log_file="orchestrator.log", max_bytes=10*1024*1024, backup_count=5):
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')

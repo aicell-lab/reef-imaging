@@ -108,6 +108,7 @@ class FakeIncubator:
         self.location = location
         self.transfer_requests = []
         self.location_updates = []
+        self.slot_puts = []
 
     async def get_sample_location(self, slot):
         return self.location
@@ -118,6 +119,9 @@ class FakeIncubator:
     async def update_sample_location(self, slot, location):
         self.location = location
         self.location_updates.append((slot, location))
+
+    async def put_sample_from_transfer_station_to_slot(self, slot):
+        self.slot_puts.append(slot)
 
 
 class FakeRoboticArm:
@@ -395,4 +399,56 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response["success"])
         self.assertEqual(response["state"], "busy")
         self.assertIn("Hamilton is busy", response["message"])
+        self.assertEqual(orchestrator.robotic_arm.calls, [])
+
+    async def test_transport_to_hamilton_fails_when_sample_not_in_incubator(self):
+        orchestrator = orchestrator_module.OrchestrationSystem()
+        orchestrator.incubator = FakeIncubator(location="hamilton")
+        orchestrator.robotic_arm = FakeRoboticArm()
+        orchestrator.hamilton_executor = FakeHamiltonExecutor()
+
+        response = await orchestrator.transport_plate_api("incubator", "hamilton", slot=3)
+
+        self.assertFalse(response["success"])
+        self.assertIn("expected sample at incubator_slot, found hamilton", response["message"])
+        self.assertEqual(orchestrator.robotic_arm.calls, [])
+
+    async def test_transport_from_hamilton_to_incubator_fails_when_sample_not_at_hamilton(self):
+        orchestrator = orchestrator_module.OrchestrationSystem()
+        orchestrator.incubator = FakeIncubator(location="incubator_slot")
+        orchestrator.robotic_arm = FakeRoboticArm()
+        orchestrator.hamilton_executor = FakeHamiltonExecutor()
+
+        response = await orchestrator.transport_plate_api("hamilton", "incubator", slot=3)
+
+        self.assertFalse(response["success"])
+        self.assertIn("expected sample at hamilton, found incubator_slot", response["message"])
+        self.assertEqual(orchestrator.robotic_arm.calls, [])
+
+    async def test_transport_from_microscope_to_hamilton_fails_when_sample_not_on_source(self):
+        orchestrator = orchestrator_module.OrchestrationSystem()
+        orchestrator.incubator = FakeIncubator(location="incubator_slot")
+        orchestrator.robotic_arm = FakeRoboticArm()
+        orchestrator.hamilton_executor = FakeHamiltonExecutor()
+        orchestrator.configured_microscopes_info = {"microscope-squid-1": {"id": "microscope-squid-1"}}
+        orchestrator.microscope_services = {"microscope-squid-1": object()}
+
+        response = await orchestrator.transport_plate_api("microscope-squid-1", "hamilton", slot=3)
+
+        self.assertFalse(response["success"])
+        self.assertIn("expected sample at microscope-squid-1, found incubator_slot", response["message"])
+        self.assertEqual(orchestrator.robotic_arm.calls, [])
+
+    async def test_transport_from_hamilton_to_microscope_fails_when_sample_not_at_hamilton(self):
+        orchestrator = orchestrator_module.OrchestrationSystem()
+        orchestrator.incubator = FakeIncubator(location="incubator_slot")
+        orchestrator.robotic_arm = FakeRoboticArm()
+        orchestrator.hamilton_executor = FakeHamiltonExecutor()
+        orchestrator.configured_microscopes_info = {"microscope-squid-1": {"id": "microscope-squid-1"}}
+        orchestrator.microscope_services = {"microscope-squid-1": object()}
+
+        response = await orchestrator.transport_plate_api("hamilton", "microscope-squid-1", slot=3)
+
+        self.assertFalse(response["success"])
+        self.assertIn("expected sample at hamilton, found incubator_slot", response["message"])
         self.assertEqual(orchestrator.robotic_arm.calls, [])

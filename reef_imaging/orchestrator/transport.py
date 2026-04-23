@@ -1,6 +1,6 @@
 """Plate transport coordination mixin."""
 import asyncio
-from .core import logger, HamiltonBusyError
+from .core import logger, HamiltonBusyError, TransportPreconditionError
 from reef_imaging.orchestration import ResourceBusyError
 
 
@@ -131,6 +131,13 @@ class TransportMixin:
                 f"{f' ({current_action})' if current_action else ''}."
             )
         return status
+
+    def _raise_transport_precondition(self, *, route: str, incubator_slot: int, detail: str):
+        """Raise a user-facing precondition error for a transport request."""
+
+        raise TransportPreconditionError(
+            f"Cannot execute {route} transport for slot {incubator_slot}: {detail}"
+        )
 
     async def _execute_load_operation(
         self,
@@ -358,8 +365,13 @@ class TransportMixin:
             actual_location = await self.incubator.get_sample_location(incubator_slot)
             logger.info(f"Incubator reports sample location for slot {incubator_slot}: {actual_location}")
             if actual_location != "incubator_slot":
-                logger.warning(f"Sample not in incubator slot {incubator_slot}, location: {actual_location}")
-                return
+                self._raise_transport_precondition(
+                    route="incubator -> hamilton",
+                    incubator_slot=incubator_slot,
+                    detail=f"expected sample at incubator_slot, found {actual_location}",
+                )
+        except TransportPreconditionError:
+            raise
         except Exception as e:
             logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
 
@@ -430,12 +442,14 @@ class TransportMixin:
             actual_location = await self.incubator.get_sample_location(incubator_slot)
             logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
 
-            if actual_location == "incubator_slot":
-                logger.info(f"Sample already in incubator slot {incubator_slot}, no unload needed")
-                return
-            elif actual_location != "hamilton":
-                logger.warning(f"Sample not at Hamilton, location: {actual_location}")
-                return
+            if actual_location != "hamilton":
+                self._raise_transport_precondition(
+                    route="hamilton -> incubator",
+                    incubator_slot=incubator_slot,
+                    detail=f"expected sample at hamilton, found {actual_location}",
+                )
+        except TransportPreconditionError:
+            raise
         except Exception as e:
             logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
 
@@ -562,14 +576,25 @@ class TransportMixin:
             logger.info(f"Actual sample location for slot {incubator_slot}: {actual_location}")
 
             if actual_location != microscope_id_str:
-                logger.warning(f"Sample not on microscope {microscope_id_str}, location: {actual_location}")
-                return
+                self._raise_transport_precondition(
+                    route=f"{microscope_id_str} -> hamilton",
+                    incubator_slot=incubator_slot,
+                    detail=f"expected sample at {microscope_id_str}, found {actual_location}",
+                )
+        except TransportPreconditionError:
+            raise
         except Exception as e:
             logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
 
         if not self.sample_on_microscope_flags.get(microscope_id_str, False):
-            logger.info(f"Sample plate not on microscope {microscope_id_str} according to flags")
-            return
+            self._raise_transport_precondition(
+                route=f"{microscope_id_str} -> hamilton",
+                incubator_slot=incubator_slot,
+                detail=(
+                    f"sample is not marked on {microscope_id_str}; "
+                    "refusing a silent no-op transport"
+                ),
+            )
 
         await self._assert_hamilton_idle_for_transport()
         logger.info(f"Transporting sample from microscope {microscope_id_str} to Hamilton (slot {incubator_slot})...")
@@ -650,14 +675,25 @@ class TransportMixin:
             actual_location = await self.incubator.get_sample_location(incubator_slot)
             logger.info(f"Incubator reports sample location for slot {incubator_slot}: {actual_location}")
             if actual_location != "hamilton":
-                logger.warning(f"Sample not at Hamilton, location: {actual_location}")
-                return
+                self._raise_transport_precondition(
+                    route=f"hamilton -> {microscope_id_str}",
+                    incubator_slot=incubator_slot,
+                    detail=f"expected sample at hamilton, found {actual_location}",
+                )
+        except TransportPreconditionError:
+            raise
         except Exception as e:
             logger.warning(f"Could not verify sample location from incubator for slot {incubator_slot}: {e}. Proceeding anyway.")
 
         if self.sample_on_microscope_flags.get(microscope_id_str, False):
-            logger.info(f"Sample plate already on microscope {microscope_id_str}. Skipping load.")
-            return
+            self._raise_transport_precondition(
+                route=f"hamilton -> {microscope_id_str}",
+                incubator_slot=incubator_slot,
+                detail=(
+                    f"sample is already marked on {microscope_id_str}; "
+                    "refusing a silent no-op transport"
+                ),
+            )
 
         await self._assert_hamilton_idle_for_transport()
         logger.info(f"Transporting sample from Hamilton to microscope {microscope_id_str} (slot {incubator_slot})...")
