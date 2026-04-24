@@ -167,7 +167,7 @@ Hamilton-specific orchestrator contract:
 
 - `transport_plate(from_device, to_device, slot=...)` remains the only physical movement API, including routes touching `hamilton`
 - `get_hamilton_status()` reports Hamilton executor connectivity, executor status, and active Hamilton-related operations
-- `run_hamilton_protocol(script_content, timeout=3600)` starts simple Hamilton script content only and returns immediately with an `action_id`
+- `run_hamilton_protocol(script_content, timeout=3600)` starts simple Hamilton script content only, prepositions the Hamilton slide rail to the Hamilton side, and returns immediately with an `action_id`
 
 Recommended composed workflow:
 
