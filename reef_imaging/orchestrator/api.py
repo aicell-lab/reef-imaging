@@ -510,6 +510,32 @@ class APIMixin:
             return {"success": False, "message": str(e)}
 
     @schema_function(skip_self=True)
+    async def stop_hamilton(self):
+        """Operator emergency API to safely stop the Hamilton robot.
+
+        Cancels all active runs, closes the Hamilton interface, and clears
+        tip tracker state.  The Hamilton can be restarted by restarting the
+        control service.
+        """
+        logger.info("Emergency stop requested for Hamilton.")
+        try:
+            service = await self._get_hamilton_executor_proxy()
+            if service is None:
+                raise RuntimeError(
+                    f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
+                )
+            result = await service.stop()
+            logger.info("Hamilton stop result: %s", result)
+            return {
+                "success": True,
+                "message": "Hamilton stopped safely.",
+                "result": result,
+            }
+        except Exception as e:
+            logger.error(f"Failed to stop Hamilton: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
     async def get_lab_video_stream_urls(self):
         """Returns public Hypha URLs for current lab video stream apps, including Hamilton when exposed."""
         base = f"{self.orchestrator_hypha_server_url}/{self.workspace}/apps"
