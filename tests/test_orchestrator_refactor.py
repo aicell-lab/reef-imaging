@@ -77,21 +77,25 @@ def _build_sample(name: str, slot: int, microscope_id: str, well: str, note: str
 
 
 class FakeHamiltonExecutor:
-    def __init__(self, *, status=None, start_result=None, poll_results=None):
+    def __init__(self, *, status=None, run_state=None, analysis_result=None):
         self.status = status or {
             "busy": False,
-            "last_action_id": None,
-            "success": True,
+            "active_runs": [],
+            "total_runs": 0,
         }
-        self.start_result = start_result or {
-            "accepted": True,
-            "busy": False,
-            "action_id": "action-1",
-            "status": "running",
+        self.run_state = run_state or {
+            "status": "succeeded",
+            "run_id": "run-1",
         }
-        self.poll_results = list(poll_results or [])
-        self.start_calls = []
-        self.poll_calls = 0
+        self.analysis_result = analysis_result or {
+            "analysis": {"status": "accepted", "rejections": [], "warnings": []},
+            "commands": [],
+            "command_count": 0,
+        }
+        self.analyze_calls: list = []
+        self.submit_calls: list = []
+        self.play_calls: list = []
+        self.get_run_calls: list = []
 
     async def ping(self):
         return "pong"
@@ -99,9 +103,21 @@ class FakeHamiltonExecutor:
     async def get_status(self):
         return dict(self.status)
 
-    async def start_protocol(self, protocol_script, timeout):
-        self.start_calls.append({"protocol_script": protocol_script, "timeout": timeout})
-        return dict(self.start_result)
+    async def analyze_protocol(self, protocol_source, manifest=None):
+        self.analyze_calls.append({"protocol_source": protocol_source, "manifest": manifest})
+        return dict(self.analysis_result)
+
+    async def submit_protocol(self, protocol_source, manifest=None):
+        self.submit_calls.append({"protocol_source": protocol_source, "manifest": manifest})
+        return {"run_id": "run-1", "status": "idle"}
+
+    async def play_run(self, run_id):
+        self.play_calls.append(run_id)
+        return {"run_id": run_id, "status": "running"}
+
+    async def get_run(self, run_id):
+        self.get_run_calls.append(run_id)
+        return dict(self.run_state)
 
 class FakeIncubator:
     def __init__(self, location="incubator_slot"):
@@ -302,7 +318,7 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(response["success"])
         self.assertFalse(response["connected"])
-        self.assertEqual(response["service_id"], "hamilton-script-executor")
+        self.assertEqual(response["service_id"], "hamilton-control-service")
         self.assertIsNone(response["executor_status"])
 
     async def test_run_hamilton_protocol_rejects_empty_script(self):
@@ -328,24 +344,21 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(response["success"])
         self.assertEqual(response["state"], "busy")
-        self.assertEqual(executor.start_calls, [])
+        self.assertEqual(executor.submit_calls, [])
 
         await orchestrator.admission_controller.release(lease.operation_id)
 
-    async def test_run_hamilton_protocol_forwards_script_and_timeout_to_executor(self):
+    async def test_run_hamilton_protocol_uses_analyze_submit_play_poll(self):
         orchestrator = orchestrator_module.OrchestrationSystem()
         executor = FakeHamiltonExecutor(
-            start_result={
-                "accepted": True,
-                "busy": False,
-                "action_id": "action-123",
-                "status": "running",
+            run_state={
+                "status": "succeeded",
+                "run_id": "run-1",
             },
             status={
-                "busy": True,
-                "current_action_id": "action-123",
-                "last_action_id": None,
-                "success": False,
+                "busy": False,
+                "active_runs": [],
+                "total_runs": 1,
             },
         )
         orchestrator.hamilton_executor = executor
@@ -362,12 +375,13 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(response["success"])
+        self.assertEqual(response["message"], "Hamilton protocol succeeded.")
+        self.assertEqual(response["run_id"], "run-1")
         self.assertEqual(orchestrator.robotic_arm.actions, ["move_plate_rail_to_hamilton"])
-        self.assertEqual(executor.start_calls[0]["protocol_script"], "print('run protocol')")
-        self.assertEqual(executor.start_calls[0]["timeout"], 3600)
-        self.assertEqual(response["action_id"], "action-123")
-        self.assertEqual(response["state"], "running")
-        self.assertTrue(response["hamilton_status"]["executor_status"]["busy"])
+        self.assertEqual(executor.analyze_calls[0]["protocol_source"], "print('run protocol')")
+        self.assertEqual(executor.submit_calls[0]["protocol_source"], "print('run protocol')")
+        self.assertEqual(executor.play_calls, ["run-1"])
+        self.assertEqual(executor.get_run_calls, ["run-1"])
 
     async def test_hamilton_execution_lock_does_not_block_unrelated_microscope_resource(self):
         orchestrator = orchestrator_module.OrchestrationSystem()
@@ -396,8 +410,8 @@ class OrchestratorRefactorTests(unittest.IsolatedAsyncioTestCase):
         orchestrator.hamilton_executor = FakeHamiltonExecutor(
             status={
                 "busy": True,
-                "current_action_id": "action-busy",
-                "success": False,
+                "active_runs": ["run-busy"],
+                "total_runs": 1,
             }
         )
 

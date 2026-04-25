@@ -92,7 +92,7 @@ class OrchestrationSystemBase:
 
         self.incubator_id = "incubator-control"
         self.robotic_arm_id = "robotic-arm-control"
-        self.hamilton_executor_id = "hamilton-script-executor"
+        self.hamilton_executor_id = "hamilton-control-service"
 
         self.tasks = {} # Stores task configurations and states
         self.health_check_tasks = {} # Stores asyncio tasks for health checks, keyed by (service_type, service_id)

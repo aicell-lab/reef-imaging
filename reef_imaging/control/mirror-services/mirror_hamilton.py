@@ -38,13 +38,13 @@ class MirrorHamiltonService:
         self.cloud_server_url = "https://hypha.aicell.io"
         self.cloud_workspace = "reef-imaging"
         self.cloud_token = os.environ.get("REEF_WORKSPACE_TOKEN")
-        self.cloud_service_id = "hamilton-script-executor"
+        self.cloud_service_id = "hamilton-control-service"
         self.cloud_server = None
         self.cloud_service = None
 
         self.local_server_url = "http://reef.dyn.scilifelab.se:9527"
         self.local_token = os.environ.get("REEF_LOCAL_TOKEN")
-        self.local_service_id = "hamilton-script-executor"
+        self.local_service_id = "hamilton-control-service"
         self.local_server = None
         self.local_service = None
 
@@ -244,7 +244,7 @@ class MirrorHamiltonService:
 
         self.mirrored_methods = self._get_mirrored_methods()
         service_config = {
-            "name": "Mirror Hamilton Script Executor",
+            "name": "Mirror Hamilton Control Service",
             "id": self.cloud_service_id,
             "config": {
                 "visibility": "protected",
@@ -287,7 +287,7 @@ class MirrorHamiltonService:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Mirror service for Hamilton script executor.")
+    parser = argparse.ArgumentParser(description="Mirror service for Hamilton control service.")
     parser.add_argument(
         "--cloud-service-id",
         help="Override the cloud service ID to register.",

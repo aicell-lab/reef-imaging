@@ -44,9 +44,10 @@ class APIMixin:
     async def run_hamilton_protocol(
         self,
         script_content: str,
+        manifest: dict = None,
         timeout: int = 3600,
     ):
-        """Mirror a simple Hamilton protocol payload to the local executor."""
+        """Submit a Hamilton protocol through analyze -> submit -> play_run with polling."""
 
         if not isinstance(script_content, str) or not script_content.strip():
             return {"success": False, "message": "script_content must be a non-empty string."}
@@ -75,30 +76,51 @@ class APIMixin:
                     )
                 # Ensure slide rail is in the Hamilton-side position before protocol execution.
                 await self.robotic_arm.execute_action("move_plate_rail_to_hamilton")
-                start_result = await service.start_protocol(
-                    protocol_script=script_content,
-                    timeout=timeout,
-                )
-                if not start_result.get("accepted"):
-                    response = {
-                        "success": False,
-                        "message": start_result.get("error") or "Hamilton executor rejected the run request.",
-                        "start_result": start_result,
-                        "hamilton_status": await self._get_hamilton_executor_status(refresh_if_missing=False),
-                    }
-                    if start_result.get("busy"):
-                        response["state"] = "busy"
-                    return response
 
-            return {
-                "success": True,
-                "message": "Hamilton protocol accepted and started.",
-                "start_result": start_result,
-                "action_id": start_result.get("action_id"),
-                "state": start_result.get("status", "running"),
-                "hamilton_status": await self.get_hamilton_status(),
-                "runtime_status": await self.get_runtime_status(),
-            }
+                # Step 1: Analyze (validate tips + volumes without touching hardware)
+                analysis = await service.analyze_protocol(script_content, manifest=manifest)
+                analysis_block = analysis.get("analysis")
+                if analysis_block and analysis_block.get("status") == "rejected":
+                    return {
+                        "success": False,
+                        "message": "Protocol rejected by resource analysis.",
+                        "analysis": analysis_block,
+                        "hamilton_status": await self.get_hamilton_status(),
+                    }
+
+                # Step 2: Submit (creates run, enqueues commands)
+                run = await service.submit_protocol(script_content, manifest=manifest)
+                run_id = run["run_id"]
+
+                # Step 3: Play (starts execution on hardware)
+                await service.play_run(run_id)
+
+                # Step 4: Poll until terminal status or timeout
+                poll_interval = 5.0
+                elapsed = 0.0
+                terminal_statuses = {"succeeded", "failed", "canceled", "state_unknown"}
+                while elapsed < timeout:
+                    run_state = await service.get_run(run_id)
+                    status = run_state.get("status", "")
+                    if status in terminal_statuses:
+                        return {
+                            "success": status == "succeeded",
+                            "message": f"Hamilton protocol {status}.",
+                            "run_id": run_id,
+                            "run": run_state,
+                            "hamilton_status": await self.get_hamilton_status(),
+                        }
+                    await asyncio.sleep(poll_interval)
+                    elapsed += poll_interval
+
+                # Timeout
+                return {
+                    "success": False,
+                    "message": f"Hamilton protocol timed out after {timeout}s.",
+                    "run_id": run_id,
+                    "run": await service.get_run(run_id),
+                    "hamilton_status": await self.get_hamilton_status(),
+                }
         except ResourceBusyError as busy_error:
             return self._busy_response(
                 "Hamilton protocol request rejected - Hamilton-related resources are busy.",

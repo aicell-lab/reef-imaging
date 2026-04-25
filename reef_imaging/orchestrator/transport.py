@@ -125,10 +125,9 @@ class TransportMixin:
                 f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
             )
         if status.get("busy"):
-            current_action = status.get("current_action_id") or status.get("action_id")
             raise HamiltonBusyError(
                 f"Hamilton is busy executing a protocol"
-                f"{f' ({current_action})' if current_action else ''}."
+                f"{f' (active runs: {status.get(\"active_runs\", [])})' if status.get('active_runs') else ''}."
             )
         return status
 
