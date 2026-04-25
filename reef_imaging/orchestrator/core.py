@@ -92,7 +92,7 @@ class OrchestrationSystemBase:
 
         self.incubator_id = "incubator-control"
         self.robotic_arm_id = "robotic-arm-control"
-        self.hamilton_executor_id = "hamilton-control-service"
+        self.hamilton_executor_id = "hamilton-script-executor"
 
         self.tasks = {} # Stores task configurations and states
         self.health_check_tasks = {} # Stores asyncio tasks for health checks, keyed by (service_type, service_id)
@@ -222,7 +222,6 @@ class OrchestrationSystemBase:
             # Emergency controls
             "cancel_microscope_scan": self.cancel_microscope_scan,
             "halt_robotic_arm": self.halt_robotic_arm,
-            "stop_hamilton": self.stop_hamilton,
             # Processing
             "process_timelapse_offline": self.process_timelapse_offline_api,
             "scan_microscope_only": self.scan_microscope_only_api,
