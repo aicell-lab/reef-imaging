@@ -222,6 +222,7 @@ class OrchestrationSystemBase:
             # Emergency controls
             "cancel_microscope_scan": self.cancel_microscope_scan,
             "halt_robotic_arm": self.halt_robotic_arm,
+            "stop_hamilton": self.stop_hamilton,
             # Processing
             "process_timelapse_offline": self.process_timelapse_offline_api,
             "scan_microscope_only": self.scan_microscope_only_api,
