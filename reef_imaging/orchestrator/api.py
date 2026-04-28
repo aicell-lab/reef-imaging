@@ -41,6 +41,42 @@ class APIMixin:
             }
 
     @schema_function(skip_self=True)
+    async def start_hamilton_session(self, initialize: bool = True):
+        """Start a persistent Hamilton session.
+
+        The Hamilton interface is held open across protocol runs so that
+        recovery commands can be issued without restarting the connection.
+        """
+        try:
+            service = await self._get_hamilton_executor_proxy()
+            if service is None:
+                raise RuntimeError(
+                    f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
+                )
+            result = await service.start_session(initialize=initialize)
+            logger.info("Hamilton session start: %s", result)
+            return {"success": True, "result": result}
+        except (ConnectionError, OSError, RuntimeError) as e:
+            logger.error(f"Failed to start Hamilton session: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
+    async def stop_hamilton_session(self):
+        """Release the persistent Hamilton session."""
+        try:
+            service = await self._get_hamilton_executor_proxy()
+            if service is None:
+                raise RuntimeError(
+                    f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
+                )
+            result = await service.stop_session()
+            logger.info("Hamilton session stop: %s", result)
+            return {"success": True, "result": result}
+        except (ConnectionError, OSError, RuntimeError) as e:
+            logger.error(f"Failed to stop Hamilton session: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
     async def run_hamilton_protocol(
         self,
         script_content: str,
