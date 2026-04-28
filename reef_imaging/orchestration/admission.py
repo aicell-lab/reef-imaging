@@ -181,6 +181,38 @@ class OperationAdmissionController:
                     del self._resource_to_operation[resource]
             self._condition.notify_all()
 
+    async def force_release_resource(self, resource: str) -> str | None:
+        """Release any operation holding *resource* and return its operation id.
+
+        Returns ``None`` when no operation held the resource.
+        """
+
+        async with self._condition:
+            operation_id = self._resource_to_operation.get(resource)
+            if operation_id is None:
+                return None
+            lease = self._leases.pop(operation_id, None)
+            if lease is not None:
+                for res in lease.resources:
+                    if self._resource_to_operation.get(res) == operation_id:
+                        del self._resource_to_operation[res]
+            self._condition.notify_all()
+            return operation_id
+
+    async def stale_operations(self, max_age_seconds: float = 600) -> list[dict[str, Any]]:
+        """Return operations that have been held longer than *max_age_seconds*."""
+
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        async with self._condition:
+            stale = []
+            for operation_id, lease in list(self._leases.items()):
+                age = (now - lease.started_at).total_seconds()
+                if age > max_age_seconds:
+                    stale.append({"operation_id": operation_id, "age_seconds": age, **lease.to_dict()})
+            return stale
+
     async def snapshot(self) -> dict[str, Any]:
         """Return a serializable view of the active reservations."""
 
@@ -199,7 +231,12 @@ class OperationAdmissionController:
         wait: bool = False,
         timeout: float | None = None,
     ):
-        """Acquire resources for the lifetime of the context manager."""
+        """Acquire resources for the lifetime of the context manager.
+
+        The lease is **always** released when the context exits, even if the
+        body raises an exception.  Callers that need a hard deadline on the
+        body itself should wrap the ``async with`` in :func:`asyncio.wait_for`.
+        """
 
         if wait:
             lease = await self.acquire(request, timeout=timeout)

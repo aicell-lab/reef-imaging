@@ -558,6 +558,31 @@ class APIMixin:
             return {"success": False, "message": str(e)}
 
     @schema_function(skip_self=True)
+    async def release_hamilton_lock(self):
+        """Force-release any stale admission lock on the Hamilton resource.
+
+        Use this when the orchestrator reports Hamilton as busy due to a
+        stale operation (e.g., after a crash or Hypha disconnection mid-run).
+        Only the holder of the *hamilton* resource is released; other
+        resources and operations are left untouched.
+        """
+        logger.info("Force-release Hamilton lock requested.")
+        released_id = await self.admission_controller.force_release_resource(
+            self._hamilton_resource()
+        )
+        snapshot = await self.admission_controller.snapshot()
+        return {
+            "success": True,
+            "released_operation_id": released_id,
+            "message": (
+                f"Released stale operation {released_id}."
+                if released_id
+                else "No operation held the Hamilton resource."
+            ),
+            "admission_snapshot": snapshot,
+        }
+
+    @schema_function(skip_self=True)
     async def get_lab_video_stream_urls(self):
         """Returns public Hypha URLs for current lab video stream apps, including Hamilton when exposed."""
         base = f"{self.orchestrator_hypha_server_url}/{self.workspace}/apps"
