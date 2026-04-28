@@ -218,8 +218,6 @@ class OrchestrationSystemBase:
             # Status and monitoring
             "get_runtime_status": self.get_runtime_status,
             "get_hamilton_status": self.get_hamilton_status,
-            "start_hamilton_session": self.start_hamilton_session,
-            "stop_hamilton_session": self.stop_hamilton_session,
             "get_lab_video_stream_urls": self.get_lab_video_stream_urls,
             # Emergency controls
             "cancel_microscope_scan": self.cancel_microscope_scan,
