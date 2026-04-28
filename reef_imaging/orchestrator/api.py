@@ -61,6 +61,19 @@ class APIMixin:
                     f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
                 )
 
+            # Step 1: Analyze (validate tips + volumes without touching hardware).
+            # Do this BEFORE acquiring the admission lock so that validation
+            # rejections never leave a leaked resource lease.
+            analysis = await service.analyze_protocol(script_content, manifest=manifest)
+            analysis_block = analysis.get("analysis")
+            if analysis_block and analysis_block.get("status") == "rejected":
+                return {
+                    "success": False,
+                    "message": "Protocol rejected by resource analysis.",
+                    "analysis": analysis_block,
+                    "hamilton_status": await self.get_hamilton_status(),
+                }
+
             request = self._build_request(
                 "hamilton-execution",
                 extra_resources=(self._hamilton_resource(),),
@@ -76,17 +89,6 @@ class APIMixin:
                     )
                 # Ensure slide rail is in the Hamilton-side position before protocol execution.
                 await self.robotic_arm.execute_action("move_plate_rail_to_hamilton")
-
-                # Step 1: Analyze (validate tips + volumes without touching hardware)
-                analysis = await service.analyze_protocol(script_content, manifest=manifest)
-                analysis_block = analysis.get("analysis")
-                if analysis_block and analysis_block.get("status") == "rejected":
-                    return {
-                        "success": False,
-                        "message": "Protocol rejected by resource analysis.",
-                        "analysis": analysis_block,
-                        "hamilton_status": await self.get_hamilton_status(),
-                    }
 
                 # Step 2: Submit (creates run, enqueues commands)
                 run = await service.submit_protocol(script_content, manifest=manifest)
