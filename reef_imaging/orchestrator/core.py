@@ -226,6 +226,7 @@ class OrchestrationSystemBase:
             "process_timelapse_offline": self.process_timelapse_offline_api,
             "scan_microscope_only": self.scan_microscope_only_api,
             "run_hamilton_protocol": self.run_hamilton_protocol,
+            "validate_hamilton_protocol": self.validate_hamilton_protocol,
         }
 
     def _get_config_file_path(self) -> str:

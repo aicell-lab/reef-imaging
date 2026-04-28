@@ -41,6 +41,40 @@ class APIMixin:
             }
 
     @schema_function(skip_self=True)
+    async def validate_hamilton_protocol(
+        self,
+        script_content: str,
+        config: dict = None,
+        entrypoint: str = "main",
+    ):
+        """Validate a Hamilton protocol script without executing it.
+
+        Proxies to the Hamilton executor's ``validate_protocol`` RPC and returns
+        structured AST and resource-analysis results. Call this before
+        ``run_hamilton_protocol`` to catch tip/volume/labware mismatches
+        without touching hardware.
+        """
+        if not isinstance(script_content, str) or not script_content.strip():
+            return {"success": False, "message": "script_content must be a non-empty string."}
+
+        try:
+            service = await self._get_hamilton_executor_proxy()
+            if service is None:
+                raise RuntimeError(
+                    f"Hamilton executor service '{self.hamilton_executor_id}' is not available."
+                )
+
+            result = await service.validate_protocol(
+                protocol_script=script_content,
+                config=config or {},
+                entrypoint=entrypoint,
+            )
+            return {"success": True, "validation": result}
+        except (ConnectionError, OSError, RuntimeError, asyncio.TimeoutError) as e:
+            logger.error(f"Hamilton protocol validation failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @schema_function(skip_self=True)
     async def run_hamilton_protocol(
         self,
         script_content: str,
