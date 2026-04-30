@@ -189,7 +189,25 @@ class HealthMixin:
     async def _reset_and_reconnect_local_server(self):
         """Null out the dead server connection and all service proxies, then reconnect."""
         logger.warning("Resetting dead local server connection and all service proxies for full reconnect...")
+
+        # Properly disconnect the old server connection before dropping it.
+        if self.local_server_connection:
+            try:
+                await self.local_server_connection.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting old server connection: {e}")
         self.local_server_connection = None
+
+        # Cancel all health check tasks so setup_connections() can start fresh ones.
+        for key, task in list(self.health_check_tasks.items()):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self.health_check_tasks.clear()
+
         self.incubator = None
         self.robotic_arm = None
         self.hamilton_executor = None
